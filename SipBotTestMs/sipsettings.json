@@ -1,0 +1,34 @@
+{
+  "SipSettings": {
+    "configs": [
+      {
+        "server": "sip:slowcasting.com",
+        "port": 50064,
+        "username": "101",
+        "password": "",
+        "fromname": "101"
+      },
+      {
+        "server": "sip:slowcasting.com",
+        "port": 50063,
+        "username": "102",
+        "password": "",
+        "fromname": "102"
+      },
+      {
+        "server": "sip:slowcasting.com",
+        "port": 50061,
+        "username": "103",
+        "password": "",
+        "fromname": "103"
+      },
+      {
+        "server": "sip:slowcasting.com",
+        "port": 50062,
+        "username": "104",
+        "password": "",
+        "fromname": "104"
+      }
+    ]
+  }
+}

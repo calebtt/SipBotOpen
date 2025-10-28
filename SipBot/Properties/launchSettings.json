@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "SipBot": {
+      "commandName": "Project",
+      "commandLineArgs": "--profile=personal"
+    }
+  }
+}

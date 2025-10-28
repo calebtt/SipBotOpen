@@ -1,0 +1,20 @@
+{
+  "SipSettings": {
+    "configs": [
+      {
+        "server": "sip:example.com",
+        "port": 50060,
+        "username": "101",
+        "password": "pw",
+        "fromname": "101"
+      },
+      {
+        "server": "sip:example.com",
+        "port": 50061,
+        "username": "102",
+        "password": "pw",
+        "fromname": "102"
+      }
+    ]
+  }
+}

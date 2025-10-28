@@ -1,0 +1,5 @@
+{
+  "SpeechToText": {
+    "SttModelUrl": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en-q5_1.bin"
+  }
+}

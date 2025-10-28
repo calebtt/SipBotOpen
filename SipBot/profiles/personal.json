@@ -1,0 +1,124 @@
+{
+  "LanguageModel": {
+    "ListenSipAccountIndex": 0,
+    "ApiKey": "YOUR_API_KEY_HERE",
+    "Model": "grok-4-fast-non-reasoning",
+    "EndPoint": "https://api.x.ai/v1",
+    "MaxTokens": 300,
+    "WelcomeMessage": "Hello! This is the digital assistant for Caleb's cellphone. How can I help you today?",
+    "WelcomeFilePath": "recordings/welcome_message.wav",
+    "InstructionsText": "You are a professional digital assistant for Caleb's cellphone, based in Mount Juliet, TN. Your primary role is to handle incoming calls politely, take messages, or escalate if requested. Collect key details like the caller's name, message content, and urgency, log via send_notification. Keep responses concise—1-3 sentences max. Confirm message: \"Got it, [summary]. I'll pass it on.\" If the caller requests escalation to Caleb, use transfer_conversation immediately. For non-relevant calls, take a brief message and end gracefully. End calls: \"Thank you—have a great day!\"",
+    "InstructionsAddendum": "\n\nEscalation: Use transfer_conversation to the full extension number (e.g., '102@slowcasting.com' for personal) for any requests to escalate or transfer. Messages: Always use send_notification to log caller messages (treat 'message' as 'issue', include name/urgency).",
+    "ToolGuidance": "\n\nAvailable tools: Use 'send_notification' to log messages (include 'message' as issue, caller details)—e.g., for 'tell him to watch Breaking Bad', log as low-urgency message. Use 'transfer_conversation' to escalate—ALWAYS pass the full extension NUMBER (e.g., '102@slowcasting.com'), NOT the name. Use 'end_conversation' for resolution or abuse (include reason)—e.g., if user says 'hang up now' or after logging message, invoke with 'user ended call'. Use 'schedule_followup' for appointments if mentioned (location, service_type). MANDATORY TOOL RULES:\n1. ESCALATE/TRANSFER FIRST: If 'speak to Caleb', 'talk to Caleb', 'urgent matter', 'escalate', 'transfer', or extension mentioned (even implied), IMMEDIATELY invoke transfer_conversation to the personal extension's NUMBER ('102@slowcasting.com') with reason='escalation requested'—OVERRIDE message-taking. For 'support', use '102@slowcasting.com'. Example: 'I'd like to speak to Caleb about an urgent matter.' → Direct urgent request to Caleb; immediate transfer to '102@slowcasting.com'. Then tool.\n2. MESSAGE: ONLY after confirming no escalation; collect name/content from SIP/context, invoke send_notification with caller_name (auto), issue=summary, urgency=low/medium/high.\n3. END CALL: After logging or 'goodbye'/'that's all', invoke end_conversation with reason.\n4. SCHEDULE: If time/location/service mentioned, invoke schedule_followup.\n5. OTHER: Respond conversationally ONLY if no tool fits; confirm and tool otherwise. Output: Then tool if needed, then 1-2 sentences. Extensions: personal='102@slowcasting.com' (Escalate to Caleb's personal extension); support='102@slowcasting.com' (Transfer to support extension). ALWAYS use these full numbers in transfer_conversation.extension.",
+    "Temperature": 0.1,
+    "Extensions": [
+      {
+        "name": "personal",
+        "number": "102@slowcasting.com",
+        "description": "Escalate to Caleb's personal extension"
+      },
+      {
+        "name": "support",
+        "number": "102@slowcasting.com",
+        "description": "Transfer to support extension"
+      }
+    ],
+    "tools": [
+      {
+        "name": "send_notification",
+        "description": "Log a message or vending issue for follow-up (treat 'message' as issue for general calls).",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "issue": {
+              "type": "string",
+              "description": "Message content or issue description",
+              "required": true
+            },
+            "location": {
+              "type": "string",
+              "description": "Location or context (optional for messages)",
+              "required": false,
+              "default": ""
+            },
+            "urgency": {
+              "type": "string",
+              "description": "Urgency level (default 'medium')",
+              "required": false,
+              "default": "medium",
+              "enum": [ "low", "medium", "high" ]
+            },
+            "caller_name": {
+              "type": "string",
+              "description": "Caller's name",
+              "required": false,
+              "default": ""
+            }
+          }
+        }
+      },
+      {
+        "name": "transfer_conversation",
+        "description": "Transfer the conversation to an extension for escalation.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "extension": {
+              "type": "string",
+              "description": "Full extension number (e.g., '102@slowcasting.com')—do not use names like 'personal' or 'support'.",
+              "required": true
+            },
+            "reason": {
+              "type": "string",
+              "description": "Brief reason",
+              "required": false,
+              "default": ""
+            }
+          }
+        }
+      },
+      {
+        "name": "end_conversation",
+        "description": "Gracefully end the call after message or resolution.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "reason": {
+              "type": "string",
+              "description": "Reason (e.g., 'message taken', 'resolved')",
+              "required": false,
+              "default": ""
+            }
+          }
+        }
+      },
+      {
+        "name": "schedule_followup",
+        "description": "Schedule a follow-up if mentioned in message (e.g., callback).",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "service_type": {
+              "type": "string",
+              "description": "Type (default 'callback')",
+              "required": false,
+              "default": "callback"
+            },
+            "location": {
+              "type": "string",
+              "description": "Context or location (optional)",
+              "required": false,
+              "default": ""
+            },
+            "preferred_time": {
+              "type": "string",
+              "description": "Preferred time (e.g., 'tomorrow')",
+              "required": false,
+              "default": ""
+            }
+          }
+        }
+      }
+    ]
+  }
+}
