@@ -226,7 +226,7 @@ public class StreamingVoiceSipBotClient
                 _llmClient.ClearHistory();
                 _llmClient.AddAssistantMessage(_welcomeMessageText);  // Add welcome as assistant message
 
-                var eps = new StreamingVoiceAudioEndPoint(_streamingSttClient, _llmClient, _ttsProvider, BotSettings.Settings.SpeechToText.SileroVadModelPath);
+                var eps = new StreamingVoiceAudioEndPoint(_streamingSttClient, _llmClient, _ttsProvider);
                 await eps.InitializeAsync();
                 _audioEndPoint = eps;
 
