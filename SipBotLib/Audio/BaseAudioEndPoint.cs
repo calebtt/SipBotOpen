@@ -35,6 +35,7 @@ public abstract class BaseAudioEndPoint : IAudioSource, IAudioSink
     private volatile bool _keepAliveSenderStarted;
 
     public event EncodedSampleDelegate? OnAudioSourceEncodedSample;
+    public event Action<EncodedAudioFrame>? OnAudioSourceEncodedFrameReady;
     public event RawAudioSampleDelegate? OnAudioSourceRawSample;
     public event SourceErrorDelegate? OnAudioSourceError;
     public event SourceErrorDelegate? OnAudioSinkError;
@@ -75,15 +76,34 @@ public abstract class BaseAudioEndPoint : IAudioSource, IAudioSink
     }
 
     /// <summary>
-    /// Decodes the 8khz 16bit mono PCMU (mu-law), then forwards the 8khz 16bit mono PCM audio RTP frames 
+    /// Decodes the 8khz 16bit mono PCMU (mu-law), then forwards the 8khz 16bit mono PCM audio RTP frames
     /// to your implementation of ProcessAudioAsync().
     /// Waits for ProcessAudioAsync() to return.
     /// </summary>
+    [Obsolete("VoIPMediaSession (SIPSorcery 10.x) delivers incoming audio via GotEncodedMediaFrame, not this RTP-level callback. Kept only for IAudioSink completeness / other media session implementations that may still use it.")]
     public virtual void GotAudioRtp(IPEndPoint remoteEndPoint, uint syncSource, uint seqNum, uint timestamp, int payloadID, bool marker, byte[] payload)
     {
         if (!_isStarted || payloadID != 0)
             return;
 
+        ProcessIncomingPcmuPayload(payload);
+    }
+
+    /// <summary>
+    /// This is the path VoIPMediaSession actually calls for incoming audio as of SIPSorcery 10.x
+    /// (wired via RTPSession.OnAudioFrameReceived += AudioSink.GotEncodedMediaFrame). Supersedes
+    /// the RTP-level GotAudioRtp callback above.
+    /// </summary>
+    public virtual void GotEncodedMediaFrame(EncodedAudioFrame encodedMediaFrame)
+    {
+        if (!_isStarted)
+            return;
+
+        ProcessIncomingPcmuPayload(encodedMediaFrame.EncodedAudio);
+    }
+
+    private void ProcessIncomingPcmuPayload(byte[] payload)
+    {
         if (payload.Length != 160)
         {
             Log.Warning($"[{GetType().Name}] Unexpected PCMU payload length: {payload.Length} bytes, expected 160 bytes.");
