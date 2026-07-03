@@ -1,108 +1,143 @@
 # SipBotOpen
 
-## Overview
+An AI voice agent that answers real phone calls over SIP. It registers as a PBX extension, picks up incoming calls, transcribes the caller in real time, runs the conversation through an LLM with tool-calling, and speaks the response back — all locally, with no cloud STT/TTS dependency required.
 
-SipBotOpen is an open-source telephone voice assistant designed to handle incoming calls intelligently. It acts as a full AI-powered voice agent pipeline, leveraging large language models (LLMs) for natural conversation handling and tool calling capabilities. Built with Semantic Kernel for AI orchestration, this project provides a robust foundation for creating automated voice responses over SIP (Session Initiation Protocol) telephony.
+**Status:** active development. Not hardened for production use; see [Known limitations](#known-limitations) before deploying against real traffic.
 
-Key highlights:
-- **Answer-Only Mode**: Focuses exclusively on responding to incoming calls without initiating outbound communications.
-- **AI-Driven Interactions**: Uses LLMs to process voice inputs, generate responses, and invoke tools dynamically.
-- **Extensible Pipeline**: Modular design allows easy integration of custom tools, APIs, or additional AI features.
+## Contents
 
-This project is ideal for developers building automated customer service bots, personal assistants, or interactive voice response (IVR) systems.
+- [How it works](#how-it-works)
+- [Project layout](#project-layout)
+- [Prerequisites](#prerequisites)
+- [Setup](#setup)
+- [Running the bot](#running-the-bot)
+- [Configuration reference](#configuration-reference)
+- [Adding a tool](#adding-a-tool)
+- [Known limitations](#known-limitations)
+- [Contributing](#contributing)
+- [License](#license)
 
-## Features
+## How it works
 
-- **Voice-to-Text and Text-to-Voice Conversion**: Seamless integration for converting speech to text (STT) and text to speech (TTS).
-- **Tool Calling**: Semantic Kernel enables the agent to call external tools or APIs based on user queries (e.g., fetching weather, scheduling events).
-- **SIP Integration**: Handles telephony via SIP protocols for reliable call management.
-- **LLM Agnostic**: Compatible with various LLMs (e.g., OpenAI, Hugging Face models) through Semantic Kernel.
-- **Customizable Prompts**: Easily tweak system prompts for tailored assistant behavior.
-- **Logging and Monitoring**: Built-in support for call logging and error handling.
-- **Security-Focused**: Designed with best practices for handling sensitive call data (e.g., no storage of personal info by default).
+1. **SIP signaling and media** ([`SipBotLib`](SipBotLib)) — registers with a SIP server/PBX, answers incoming calls, and handles RTP audio. Built on [SIPSorcery](https://github.com/sipsorcery-org/sipsorcery). Supports PCMU (narrowband, always on) and G.722 (wideband, opt-in) — VitalPBX and other Asterisk-based systems support G.722 with no extra licensing.
+2. **Voice activity detection** ([`MinimalSileroVAD.Core`](MinimalSileroVAD.Core)) — segments caller audio into utterances using the [Silero VAD](https://github.com/snakers4/silero-vad) ONNX model, so the bot only transcribes actual speech.
+3. **Speech-to-text** — local transcription via [Whisper.net](https://github.com/sandrohanea/whisper.net), optionally CUDA-accelerated.
+4. **Conversation and tool-calling** — [Microsoft Semantic Kernel](https://github.com/microsoft/semantic-kernel) orchestrates the LLM call and any tool invocations (transferring the call, logging a message, scheduling a follow-up, ending the call). Talks to any OpenAI-compatible endpoint; the example profile targets Grok (xAI).
+5. **Text-to-speech** — local synthesis via [KokoroSharp](https://github.com/Lyrcaxis/KokoroSharp), paced back out over RTP.
+
+## Project layout
+
+| Project | Purpose |
+|---|---|
+| `SipBot/` | The bot itself — entry point, call handling, STT/TTS/LLM pipeline, tool implementations. |
+| `SipBotLib/` | Reusable SIP client library (registration, call answering, RTP audio, codec negotiation). |
+| `MinimalSileroVAD.Core/` | Silero VAD wrapper used for speech segmentation. |
+| `MinimalVadTest/` | Standalone console harness for exercising the VAD library against a WAV file. |
+| `SipBotTestMs/` | MSTest unit tests. |
 
 ## Prerequisites
 
-- .NET SDK (version 8.0 or higher recommended)
-- Access to an LLM provider (e.g., xAI API key)
-- SIP server or provider (e.g., Twilio, Asterisk) for testing telephony features
-- ONNX Runtime (for model inference)
-- cuDNN (for GPU acceleration with CUDA-enabled setups)
-- Optional: STT/TTS services (e.g., Google Cloud Speech-to-Text, Amazon Polly); for local STT, ensure Whisper.cpp dependencies are met, including CUDA toolkit if using GPU.
+- .NET 8 SDK
+- A SIP account or PBX extension to register against (this has been tested live against a VitalPBX-backed trunk)
+- An API key for an OpenAI-compatible LLM endpoint (the example profile uses Grok/xAI)
+- Local model files (not included in the repo — see below):
+  - A Whisper GGML model for STT (e.g. `ggml-base.en-q5_1.bin`)
+  - A Kokoro ONNX model for TTS (e.g. `kokoro.onnx`)
+  - The Silero VAD ONNX model for speech segmentation (`silero_vad.onnx`)
+- Optional: CUDA Toolkit + a supported NVIDIA GPU, if you want GPU-accelerated STT/TTS instead of CPU inference
 
-## Installation
+## Setup
 
-1. Clone the repository:
+```bash
+git clone https://github.com/calebtt/SipBotOpen.git
+cd SipBotOpen
+dotnet restore SipBot/SipBot.sln
+```
 
-    git clone https://github.com/calebtt/SipBotOpen.git
-    cd SipBotOpen
+**Model files.** Place the three model files above under `SipBot/models/`:
 
-2. Restore NuGet packages:
+```
+SipBot/models/
+├── ggml-base.en-q5_1.bin
+├── kokoro.onnx
+└── silero_vad.onnx
+```
 
-    dotnet restore
+**Configuration.** None of these are committed (they hold credentials) — create them alongside `SipBot.csproj`:
 
-3. Configure settings:
-   - Edit `sipsettings.json` to add your SIP info, such as server, port, username, password, and BulkVS details if applicable (note: storing keys in JSON is not the most secure option, but it's how the project is currently set up; consider using a proper secrets manager in production).
-   - Edit `sttsettings.json` to set the STT model URL if needed.
-   - Create or edit a profile JSON file in the `profiles/` directory (e.g., `personal.json`) and add your LLM API key, model, endpoint, and other settings.
-   - Optionally, set the `BOT_PROFILE` environment variable to your profile name (without .json extension) to load it automatically.
+- `sipsettings.json` — one or more SIP account configs (server, port, username, password). See [`SipBotLib`'s settings model](SipBotLib/Config/SipBotSettings.cs) for the exact shape.
+- `sttsettings.json` — points at your local model files:
 
-4. Build the project:
-
-    dotnet build
-
-## Usage
-
-1. Run the application:
-
-    dotnet run
-
-2. The bot acts as a full SIP client and will register with the SIP server using the credentials from `sipsettings.json`. Ensure your SIP server or trunk is configured to route incoming calls to the registered usernames/extensions (e.g., "101", "102").
-
-3. Test a call:
-   - Dial the configured SIP number associated with one of the bot's registered accounts.
-   - Speak a query (e.g., "What's the weather today?").
-   - The bot will process the input via LLM, call tools if needed, and respond verbally.
-
-For advanced customization:
-- Edit the profile JSON (e.g., `personal.json`) to modify system prompts like InstructionsText, InstructionsAddendum, ToolGuidance, etc., and to define tools schemas under the "tools" array.
-- Add new tools by implementing Semantic Kernel skills in code, following the examples provided in SimpleSemanticToolFunctions.cs (code-based implementations, no plugin DLLs required).
-
-Example code snippet for adding a custom tool (using modern C# best practices):
-
-    using Microsoft.SemanticKernel;
-    using Microsoft.SemanticKernel.Skills.Core;
-
-    // Define a custom tool
-    [KernelFunction("GetWeather")]
-    [Description("Fetches current weather for a city.")]
-    public async Task<string> GetWeatherAsync(string city)
-    {
-        // Use HttpClient for API calls (inject via DI for robustness)
-        using var httpClient = new HttpClient();
-        var response = await httpClient.GetStringAsync($"https://api.weatherapi.com/v1/current.json?key=your_key&q={city}");
-        // Parse and return relevant data (error handling omitted for brevity)
-        return $"Weather in {city}: Sunny, 75°F"; // Placeholder
+  ```json
+  {
+    "SpeechToText": {
+      "SttModelUrl": "models/ggml-base.en-q5_1.bin",
+      "SileroVadModelPath": "models/silero_vad.onnx"
     }
+  }
+  ```
+
+- `profiles/<name>.json` — one file per bot "personality": LLM settings, system prompt, and the tools it can call. See [`SipBot/profiles/personal.json`](SipBot/profiles/personal.json) for a full worked example.
+
+Build once configured (from the repo root, builds all projects):
+
+```bash
+dotnet build SipBot/SipBot.sln
+```
+
+## Running the bot
+
+Settings are loaded relative to the current directory, so run from inside `SipBot/`:
+
+```bash
+cd SipBot
+dotnet run
+```
+
+By default it loads the `vendpartners` profile; override with `--profile=<name>` or the `BOT_PROFILE` environment variable. On startup it registers with your SIP server using the account selected by `LanguageModel.ListenSipAccountIndex` in the active profile. Route incoming calls to that extension and call in to test.
+
+## Configuration reference
+
+| File | Contains |
+|---|---|
+| `sipsettings.json` | SIP account credentials (one or more accounts; the bot listens on the one selected by profile) |
+| `sttsettings.json` | Paths to the local Whisper and Silero VAD models |
+| `profiles/<name>.json` | LLM endpoint/key/model, system prompt (`InstructionsText`, `InstructionsAddendum`, `ToolGuidance`), welcome message, and the `tools`/`Extensions` the bot can use during a call |
+
+Credentials in these files are plaintext JSON — fine for local development, but swap in a real secrets manager before running anything that matters.
+
+## Adding a tool
+
+Tools are defined two places: the JSON schema in your profile's `tools` array (so the LLM knows the tool exists and its parameters), and the implementation as a `[KernelFunction]` method. See [`SimpleSemanticToolFunctions.cs`](SipBot/Agent/LLMClient/SimpleSemanticToolFunctions.cs) for the existing tools (`send_notification`, `transfer_conversation`, `end_conversation`, `schedule_followup`) as a template:
+
+```csharp
+[KernelFunction("get_weather")]
+[Description("Fetches current weather for a city.")]
+public async Task<string> GetWeatherAsync(
+    [Description("City name")] string city)
+{
+    using var httpClient = new HttpClient();
+    var response = await httpClient.GetStringAsync($"https://api.weatherapi.com/v1/current.json?key=YOUR_KEY&q={city}");
+    // parse and return the relevant fields
+    return response;
+}
+```
+
+Then add the matching entry to your profile's `tools` array so the model knows to call it.
+
+## Known limitations
+
+- **Wideband audio (G.722) doesn't reach the TTS output yet.** `SipBotLib` supports negotiating and decoding G.722, and inbound caller audio benefits from it automatically. Outbound TTS audio still goes out as PCMU regardless of what got negotiated, since that path doesn't route through the codec-aware pipeline. Enabling wideband on the bot's audio endpoint without also fixing this would risk sending malformed audio on any call where G.722 negotiates.
+- **No AEC (acoustic echo cancellation).** There's a stub method suggesting one was planned; it's currently a no-op.
+- No license is set yet — see [License](#license).
 
 ## Contributing
 
-Contributions are welcome! Please follow these steps:
 1. Fork the repository.
-2. Create a feature branch (`git checkout -b feature/YourFeature`).
-3. Commit your changes (`git commit -m 'Add YourFeature'`).
-4. Push to the branch (`git push origin feature/YourFeature`).
-5. Open a Pull Request.
-
-Adhere to modern best practices: Use meaningful commit messages, include unit tests, and follow C# coding standards (e.g., async/await for I/O operations).
+2. Create a feature branch (`git checkout -b feature/your-feature`).
+3. Commit with a message that explains *why*, not just what.
+4. Open a pull request describing what changed and how you verified it.
 
 ## License
 
-No license has been set for this project yet. Please contact the repository owner for usage permissions.
-
-## Acknowledgments
-
-- Built with [Microsoft Semantic Kernel](https://github.com/microsoft/semantic-kernel).
-- Inspired by open-source voice AI projects.
-
-For questions or issues, open a GitHub issue or reach out via discussions.
+No license has been set for this project yet. Contact the repository owner for usage permissions.
