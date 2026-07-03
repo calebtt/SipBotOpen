@@ -7,7 +7,7 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SipBot", "SipBot.csproj", "
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SipBotLib", "..\SipBotLib\SipBotLib.csproj", "{8954DC0D-5103-4F51-AA8B-292D820000A5}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MinimalSileroVAD.Core", "..\MinimalSileroVAD.Core\MinimalSileroVAD.Core.csproj", "{319CBBD0-9469-E2D2-5B72-40484971DDA0}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MinimalSileroVAD.Core", "..\MinimalSileroVad\MinimalSileroVAD.Core\MinimalSileroVAD.Core.csproj", "{319CBBD0-9469-E2D2-5B72-40484971DDA0}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MinimalVadTest", "..\MinimalVadTest\MinimalVadTest.csproj", "{B8A0D473-99B3-CDD0-F328-7CA82CE6EFA8}"
 EndProject

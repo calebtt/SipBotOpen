@@ -11,10 +11,9 @@ public class VoiceAgentCore
     private readonly LlmChat _llmChat;
     private readonly TtsStreamer _ttsStreamer;
     private readonly RtpAudioPacer _audioPacer;
-    private readonly string _sileroVadModelPath;
 
     private CancellationTokenSource? _cancellationTokenSource = null;
-    private VadSpeechSegmenter? _vad = null;
+    private IVadSpeechSegmenter? _vad = null;
 
     // Streaming STT and interruption handling
     private readonly object _processingLock = new();
@@ -28,16 +27,12 @@ public class VoiceAgentCore
         SttProviderStreaming streamingSttClient,
         LlmChat llmChat,
         TtsStreamer ttsStreamer,
-        RtpAudioPacer audioPacer,
-        string sileroVadModelPath)
+        RtpAudioPacer audioPacer)
     {
         _streamingSttClient = streamingSttClient ?? throw new ArgumentNullException(nameof(streamingSttClient));
         _llmChat = llmChat ?? throw new ArgumentNullException(nameof(llmChat));
         _ttsStreamer = ttsStreamer ?? throw new ArgumentNullException(nameof(ttsStreamer));
         _audioPacer = audioPacer ?? throw new ArgumentNullException(nameof(audioPacer));
-        _sileroVadModelPath = string.IsNullOrEmpty(sileroVadModelPath)
-            ? throw new ArgumentException("Silero VAD model path is required.", nameof(sileroVadModelPath))
-            : sileroVadModelPath;
 
         _ttsStreamer.OnEchoRegistrationRequired += RegisterTtsAudioForEchoCancellation;
         _ttsStreamer.OnAudioChunkReady += (sender, chunk) => OnAudioReplyReady?.Invoke(chunk!);
@@ -56,13 +51,20 @@ public class VoiceAgentCore
         {
             _cancellationTokenSource = new CancellationTokenSource();
 
-            // Initialize VAD for speech segmentation
-            _vad = new(_sileroVadModelPath);
+            // Initialize VAD for speech segmentation. MsPerFrame MUST match what
+            // ProcessIncomingAudioChunk actually pushes per call (20ms, matching RTP) -- it's not
+            // just documentation, VadSpeechSegmenter computes its begin/end-of-utterance frame-
+            // count thresholds from it once at construction (e.g. BeginOfUtteranceMs / MsPerFrame),
+            // so a mismatch against the real per-call duration silently skews utterance timing.
+            // The library's own default (32ms, the Silero model's native inference window) is
+            // unrelated to and independent of this -- PushFrame's internal windowing handles that
+            // regardless of the caller's chunk size.
+            _vad = new VadSpeechSegmenter(new VadOptions { MsPerFrame = 20 });
 
             bool volumeFilterActive = false; // Local; use volatile if multi-threaded contention
 
-            // VAD sentence begin: lower TTS volume during user speech
-            _vad.SentenceBegin += (sender, e) =>
+            // VAD speech started: lower TTS volume during user speech
+            _vad.SpeechStarted += (sender, e) =>
             {
                 Log.Information("VAD: Speech segment started.");
 
@@ -75,12 +77,13 @@ public class VoiceAgentCore
                 }
             };
 
-            _vad.SentenceCompleted += (sender, pcmStream) =>
+            _vad.SpeechCompleted += (sender, segment) =>
             {
                 if (_cancellationTokenSource?.IsCancellationRequested == true)
                     return;
 
-                Log.Information($"VAD: Speech segment completed, {pcmStream.Length} bytes");
+                Log.Information("VAD: Speech segment completed, {Bytes} bytes, {Duration:F2}s, peak probability {Probability:F2}",
+                    segment.Pcm.Length, segment.Duration.TotalSeconds, segment.Probability);
 
                 if (volumeFilterActive)
                 {
@@ -90,7 +93,7 @@ public class VoiceAgentCore
                 }
 
                 // Process through streaming STT for real-time detection
-                _streamingSttClient.ProcessAudioChunkAsync(pcmStream).Wait();
+                _streamingSttClient.ProcessAudioChunkAsync(segment.AsStream()).Wait();
             };
 
             Log.Information("VoiceAgentCore initialized.");
@@ -135,7 +138,7 @@ public class VoiceAgentCore
         if (_vad == null || _cancellationTokenSource?.IsCancellationRequested == true)
             return;
 
-        _vad.PushFrame(pcm16Khz, sampleRate: 16000, frameLengthMs: 20);
+        _vad.PushFrame(pcm16Khz, frameLengthMs: 20);
     }
 
     /// <summary>

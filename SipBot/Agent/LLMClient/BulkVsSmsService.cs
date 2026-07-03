@@ -10,6 +10,18 @@ using System.Text.Json.Serialization;
 
 namespace SipBot;
 
+// Previously nested inside SipBotLib's SipConfig; moved here when SipBotLib became a plain
+// submodule of the upstream (vanilla) repo, which has no BulkVS-specific config -- this is
+// SipBotOpen's own SMS integration, not generic SIP client functionality.
+public class BulkVsConfig
+{
+    [JsonPropertyName("apiBaseUrl")] public string ApiBaseUrl { get; set; } = "https://portal.bulkvs.com";
+    [JsonPropertyName("username")] public string Username { get; set; } = string.Empty;  // API username (e.g., email)
+    [JsonPropertyName("password")] public string Password { get; set; } = string.Empty;  // API secret key
+    [JsonPropertyName("fromNumber")] public string FromNumber { get; set; } = string.Empty;  // Sender DID (E.164)
+    [JsonPropertyName("maxRetries")] public int? MaxRetries { get; set; } = 3;
+}
+
 public static partial class Algos
 {
     public static string TruncateMessage(string message, int maxLength)

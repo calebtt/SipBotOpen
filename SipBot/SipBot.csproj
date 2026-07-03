@@ -43,7 +43,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\MinimalSileroVAD.Core\MinimalSileroVAD.Core.csproj" />
+    <ProjectReference Include="..\MinimalSileroVad\MinimalSileroVAD.Core\MinimalSileroVAD.Core.csproj" />
     <ProjectReference Include="..\SipBotLib\SipBotLib.csproj" />
   </ItemGroup>
 

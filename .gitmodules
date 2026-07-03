@@ -1,0 +1,6 @@
+[submodule "SipBotLib"]
+	path = SipBotLib
+	url = https://github.com/calebtt/SipBotLib.git
+[submodule "MinimalSileroVad"]
+	path = MinimalSileroVad
+	url = https://github.com/calebtt/MinimalSileroVad.git

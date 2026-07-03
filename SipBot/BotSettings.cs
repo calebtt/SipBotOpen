@@ -101,13 +101,6 @@ public static class BotSettings
         var sipIndex = Settings.ProfileExtension.SipAccountIndex;
         if (sipIndex < 0 || sipIndex >= Settings.SipSettings.Configs.Count)
             throw new InvalidOperationException($"ProfileExtension.SipAccountIndex ({sipIndex}) is out of bounds for {Settings.SipSettings.Configs.Count} SIP configs.");
-
-        // Additional validation for BulkVs (if any config has it)
-        foreach (var config in Settings.SipSettings.Configs)
-        {
-            if (config.BulkVs != null && (string.IsNullOrEmpty(config.BulkVs.Username) || string.IsNullOrEmpty(config.BulkVs.Password)))
-                throw new InvalidOperationException($"Incomplete BulkVS config for SIP username '{config.Username}': Username and Password required for Basic Auth.");
-        }
     }
 
     public static async Task ReloadAsync(string? profileName = null, string? profilesDirectory = null) =>
@@ -156,9 +149,6 @@ public class SpeechToTextConfig
 {
     [JsonPropertyName("SttModelUrl")]
     public string SttModelUrl { get; set; } = string.Empty;
-
-    [JsonPropertyName("SileroVadModelPath")]
-    public string SileroVadModelPath { get; set; } = "models/silero_vad.onnx";
 }
 
 public class LanguageModelConfig

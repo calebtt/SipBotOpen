@@ -4,6 +4,7 @@ using SipBot;
 using System.Runtime.CompilerServices;
 using System.Threading.Channels;
 using VadSpeechSegmenter = MinimalSileroVAD.Core.VadSpeechSegmenter;
+using SpeechSegment = MinimalSileroVAD.Core.SpeechSegment;
 
 namespace MinimalVadTest;
 
@@ -23,7 +24,7 @@ public static partial class Algos
 }
 
 // Minimal VAD test app with microphone input, Silero VAD, and streaming STT.
-// Does require the silero_vad.onnx model file in the /models/ directory.
+// The Silero model is embedded in MinimalSileroVAD.Core -- no model file needed on disk.
 internal static class Program
 {
     private const int AudioSampleRate = 16000;
@@ -50,9 +51,9 @@ internal static class Program
             Log.Information("Starting MinimalVadTest");
             Log.Information("EnableEcho: {EnableEcho}", EnableEcho);
 
-            using var segmenter = new VadSpeechSegmenter("models/silero_vad.onnx", msPerFrame: 32);
-            segmenter.SentenceBegin += OnSentenceBegin;
-            segmenter.SentenceCompleted += OnSentenceCompleted;
+            using var segmenter = new VadSpeechSegmenter();
+            segmenter.SpeechStarted += OnSentenceBegin;
+            segmenter.SpeechCompleted += OnSentenceCompleted;
 
             using var cts = new CancellationTokenSource();
             Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
@@ -82,13 +83,12 @@ internal static class Program
         Log.Information("*** Sentence Begin at {Time:F2}s ***", audioTimeSec);
     }
 
-    private static async void OnSentenceCompleted(object? sender, MemoryStream sentence)
+    private static async void OnSentenceCompleted(object? sender, SpeechSegment segment)
     {
-        var durationSeconds = sentence.Length / 2f / AudioSampleRate;
-        Log.Information("*** Sentence Completed at {Time:F2}s — Duration {Dur:F2}s ({Bytes} bytes) ***",
-            audioTimeSec, durationSeconds, sentence.Length);
+        Log.Information("*** Sentence Completed at {Time:F2}s — Duration {Dur:F2}s ({Bytes} bytes, peak probability {Prob:F2}) ***",
+            audioTimeSec, segment.Duration.TotalSeconds, segment.Pcm.Length, segment.Probability);
 
-        await _streamingSttClient?.ProcessAudioChunkAsync(sentence);
+        await _streamingSttClient?.ProcessAudioChunkAsync(segment.AsStream());
         var transcript = await _streamingSttClient?.WaitForCompleteTranscriptionAsync();
         Log.Information("Transcription: {Text}", transcript ?? "");
     }
@@ -139,7 +139,7 @@ internal static class Program
             Log.Information("Chunk #{Chunk} AvgAmp {Amp:F3}", chunkCounter, avgAmp);
 
         byte[] monoPcm = Algos.FloatToPcm16(chunk);
-        segmenter.PushFrame(monoPcm, 16000, 32);
+        segmenter.PushFrame(monoPcm, 32);
         audioTimeSec += (double)ChunkSamples / AudioSampleRate;
     }
 

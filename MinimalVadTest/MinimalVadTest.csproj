@@ -19,7 +19,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\MinimalSileroVAD.Core\MinimalSileroVAD.Core.csproj" />
+    <ProjectReference Include="..\MinimalSileroVad\MinimalSileroVAD.Core\MinimalSileroVAD.Core.csproj" />
     <ProjectReference Include="..\SipBot\SipBot.csproj" />
   </ItemGroup>
 
@@ -28,9 +28,6 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <None Update="models\kokoro.onnx">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Update="models\silero_vad.onnx">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>
