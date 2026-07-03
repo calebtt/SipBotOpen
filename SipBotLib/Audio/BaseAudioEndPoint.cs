@@ -1,5 +1,5 @@
-﻿using NAudio.Codecs;
 using Serilog;
+using SIPSorcery.Media;
 using SIPSorceryMedia.Abstractions;
 using System.Net;
 using System.Threading.Channels;
@@ -12,12 +12,13 @@ public abstract class BaseAudioEndPoint : IAudioSource, IAudioSink
     protected bool _isMediaSessionReady = false;
     protected CancellationTokenSource _processAudioCancellationSource = new();
 
-    // GotAudioRtp is invoked synchronously by the SIP/RTP receive path. Frames are handed off
-    // to this channel and drained by a single background worker, so ProcessAudioAsync() (which
-    // may do real work like STT/echo-cancellation) never blocks the RTP thread. Bounded +
-    // DropOldest keeps memory bounded and favors real-time freshness over completeness if the
-    // consumer falls behind, rather than growing an unbounded backlog.
-    private Channel<byte[]>? _rtpAudioChannel;
+    // GotAudioRtp/GotEncodedMediaFrame are invoked synchronously by the SIP/RTP receive path.
+    // Frames are handed off to this channel (decoded PCM + the sample rate it decoded to) and
+    // drained by a single background worker, so ProcessAudioAsync() (which may do real work like
+    // STT/echo-cancellation) never blocks the RTP thread. Bounded + DropOldest keeps memory bounded
+    // and favors real-time freshness over completeness if the consumer falls behind, rather than
+    // growing an unbounded backlog.
+    private Channel<(byte[] Pcm, int SampleRateHz)>? _rtpAudioChannel;
     private Task? _rtpProcessingTask;
 
     // Opt-in continuous outbound RTP: many real PBX/trunk providers sit behind their own NAT and
@@ -33,6 +34,28 @@ public abstract class BaseAudioEndPoint : IAudioSource, IAudioSink
     private readonly bool _enableContinuousKeepAlive;
     private readonly RtpPacedSender _keepAlivePacedSender = new();
     private volatile bool _keepAliveSenderStarted;
+    private volatile bool _audioEncoderDisposed;
+
+    // Wideband audio (G.722, 16kHz): off by default so existing subclasses keep their exact
+    // current behavior (PCMU/8kHz only) unless they explicitly opt in. G.722 is a good first
+    // wideband codec to add because it's supported out of the box by Asterisk-based PBX systems
+    // (including VitalPBX) with no licensing or extra modules, and its 20ms RTP payload is 160
+    // bytes -- same as PCMU's -- so RtpPacedSender's fixed frame size didn't need to change.
+    //
+    // NOTE: G.722 has a well-known RTP quirk -- the RTP/SDP clock rate is declared as 8000 for
+    // historical compatibility, but the actual decoded PCM sample rate is 16000. Use
+    // AudioFormat.ClockRate (not RtpClockRate) to get the real sample rate; this class does that
+    // throughout.
+    //
+    // Enabling this changes ProcessAudioAsync's effective sample rate to whatever gets negotiated
+    // (8000 or 16000) -- a subclass MUST use the sampleRateHz parameter rather than assuming 8kHz.
+    // It also changes SendAudioFrame's contract to raw PCM in (previously pre-encoded PCMU bytes);
+    // see that method's remarks.
+    private readonly bool _enableWidebandAudio;
+    private readonly AudioEncoder _audioEncoder;
+    private readonly AudioFormat _pcmuFormat = new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU);
+    private readonly AudioFormat _g722Format = new AudioFormat(SDPWellKnownMediaFormatsEnum.G722);
+    private AudioFormat _negotiatedSendFormat;
 
     public event EncodedSampleDelegate? OnAudioSourceEncodedSample;
     public event Action<EncodedAudioFrame>? OnAudioSourceEncodedFrameReady;
@@ -49,13 +72,20 @@ public abstract class BaseAudioEndPoint : IAudioSource, IAudioSink
     /// ExternalAudioSourceEncodedSample() so outbound audio is paced onto the same cadence instead
     /// of bursting.
     /// </param>
-    public BaseAudioEndPoint(bool enableContinuousKeepAlive = false)
+    /// <param name="enableWidebandAudio">
+    /// Advertise and support G.722 (16kHz) in addition to PCMU (8kHz). Defaults to false -- see
+    /// class remarks above for what changes when this is enabled.
+    /// </param>
+    public BaseAudioEndPoint(bool enableContinuousKeepAlive = false, bool enableWidebandAudio = false)
     {
-        _supportedFormats = new List<AudioFormat>
-        {
-            new AudioFormat(0, "PCMU", 8000, 1)
-        };
         _enableContinuousKeepAlive = enableContinuousKeepAlive;
+        _enableWidebandAudio = enableWidebandAudio;
+
+        _audioEncoder = enableWidebandAudio
+            ? new AudioEncoder(_g722Format, _pcmuFormat) // G.722 listed first: preferred if the far end supports it
+            : new AudioEncoder(_pcmuFormat);
+        _supportedFormats = new List<AudioFormat>(_audioEncoder.SupportedFormats);
+        _negotiatedSendFormat = _pcmuFormat; // safe default until SetAudioSourceFormat is called post-negotiation
     }
 
     // Forwards (invokes) the data on OnAudioSourceEncodedSample, which actually tells the SIP lib to send data.
@@ -76,60 +106,74 @@ public abstract class BaseAudioEndPoint : IAudioSource, IAudioSink
     }
 
     /// <summary>
-    /// Decodes the 8khz 16bit mono PCMU (mu-law), then forwards the 8khz 16bit mono PCM audio RTP frames
-    /// to your implementation of ProcessAudioAsync().
-    /// Waits for ProcessAudioAsync() to return.
+    /// Decodes an RTP-level payload (PCMU or, if wideband is enabled, G.722), then forwards the
+    /// decoded PCM to your implementation of ProcessAudioAsync().
     /// </summary>
     [Obsolete("VoIPMediaSession (SIPSorcery 10.x) delivers incoming audio via GotEncodedMediaFrame, not this RTP-level callback. Kept only for IAudioSink completeness / other media session implementations that may still use it.")]
     public virtual void GotAudioRtp(IPEndPoint remoteEndPoint, uint syncSource, uint seqNum, uint timestamp, int payloadID, bool marker, byte[] payload)
     {
-        if (!_isStarted || payloadID != 0)
+        if (!_isStarted)
             return;
 
-        ProcessIncomingPcmuPayload(payload);
+        if (payloadID == _pcmuFormat.FormatID)
+        {
+            ProcessIncomingEncodedPayload(payload, _pcmuFormat);
+        }
+        else if (_enableWidebandAudio && payloadID == _g722Format.FormatID)
+        {
+            ProcessIncomingEncodedPayload(payload, _g722Format);
+        }
+        else
+        {
+            Log.Warning($"[{GetType().Name}] GotAudioRtp: unrecognized/unsupported payload type {payloadID}, dropping.");
+        }
     }
 
     /// <summary>
     /// This is the path VoIPMediaSession actually calls for incoming audio as of SIPSorcery 10.x
     /// (wired via RTPSession.OnAudioFrameReceived += AudioSink.GotEncodedMediaFrame). Supersedes
-    /// the RTP-level GotAudioRtp callback above.
+    /// the RTP-level GotAudioRtp callback above. The frame carries its own AudioFormat, so decoding
+    /// is correct regardless of which codec was actually negotiated for this call.
     /// </summary>
     public virtual void GotEncodedMediaFrame(EncodedAudioFrame encodedMediaFrame)
     {
         if (!_isStarted)
             return;
 
-        ProcessIncomingPcmuPayload(encodedMediaFrame.EncodedAudio);
+        ProcessIncomingEncodedPayload(encodedMediaFrame.EncodedAudio, encodedMediaFrame.AudioFormat);
     }
 
-    private void ProcessIncomingPcmuPayload(byte[] payload)
+    private void ProcessIncomingEncodedPayload(byte[] payload, AudioFormat format)
     {
-        if (payload.Length != 160)
+        short[] decodedSamples;
+        try
         {
-            Log.Warning($"[{GetType().Name}] Unexpected PCMU payload length: {payload.Length} bytes, expected 160 bytes.");
+            decodedSamples = _audioEncoder.DecodeAudio(payload, format);
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, $"[{GetType().Name}] Failed to decode {format.FormatName} payload ({payload.Length} bytes).");
             return;
         }
-        // Decode PCMU 8khz 16bit mono to PCM
-        short[] decodedSamples = new short[payload.Length];
-        for (int i = 0; i < payload.Length; i++)
-            decodedSamples[i] = MuLawDecoder.MuLawToLinearSample(payload[i]);
+
         byte[] rawBytes = new byte[decodedSamples.Length * 2];
         Buffer.BlockCopy(decodedSamples, 0, rawBytes, 0, rawBytes.Length);
 
         // Hand off for background processing instead of blocking the RTP receive thread.
-        // TryWrite never blocks on a bounded DropOldest channel.
-        _rtpAudioChannel?.Writer.TryWrite(rawBytes);
+        // TryWrite never blocks on a bounded DropOldest channel. format.ClockRate (not
+        // RtpClockRate) is the real PCM sample rate -- see the G.722 note in the class remarks.
+        _rtpAudioChannel?.Writer.TryWrite((rawBytes, format.ClockRate));
     }
 
-    private async Task ProcessAudioChannelAsync(ChannelReader<byte[]> reader, CancellationToken token)
+    private async Task ProcessAudioChannelAsync(ChannelReader<(byte[] Pcm, int SampleRateHz)> reader, CancellationToken token)
     {
         try
         {
-            await foreach (var pcm in reader.ReadAllAsync(token))
+            await foreach (var (pcm, sampleRateHz) in reader.ReadAllAsync(token))
             {
                 try
                 {
-                    await ProcessAudioAsync(pcm);
+                    await ProcessAudioAsync(pcm, sampleRateHz);
                 }
                 catch (Exception ex)
                 {
@@ -148,14 +192,27 @@ public abstract class BaseAudioEndPoint : IAudioSource, IAudioSink
     public abstract Task ShutdownAsync();
 
     /// <summary>
-    /// Audio received for internal processing (from cellphone, GotAudioRtp forwards audio to this.)
-    /// Audio is 8khz 16bit mono PCM.
+    /// Audio received for internal processing (from cellphone, GotAudioRtp/GotEncodedMediaFrame
+    /// forwards audio to this). Audio is 16-bit mono PCM at sampleRateHz -- 8000 for PCMU, or 16000
+    /// for G.722 when wideband audio is enabled. Do not assume 8kHz; use sampleRateHz.
     /// </summary>
-    protected abstract Task ProcessAudioAsync(byte[] pcm8Khz);
+    protected abstract Task ProcessAudioAsync(byte[] pcm, int sampleRateHz);
 
     // IAudioSource and IAudioSink interface implementations
     public void SetAudioSinkFormat(AudioFormat audioFormat) { }
-    public void SetAudioSourceFormat(AudioFormat audioFormat) { }
+
+    /// <summary>
+    /// Called by VoIPMediaSession once SDP negotiation completes, telling us which format to use
+    /// for OUTBOUND audio. (There's no equivalent call for the sink/inbound format -- per
+    /// SIPSorcery's own VoIPMediaSession comments, that isn't knowable until the first RTP packet
+    /// actually arrives, which is why GotEncodedMediaFrame reads the format off each frame instead.)
+    /// </summary>
+    public void SetAudioSourceFormat(AudioFormat audioFormat)
+    {
+        _negotiatedSendFormat = audioFormat;
+        Log.Information($"[{GetType().Name}] Negotiated outbound audio format: {audioFormat.FormatName} @ {audioFormat.ClockRate}Hz (RTP clock rate {audioFormat.RtpClockRate}Hz).");
+    }
+
     public bool IsAudioSourcePaused() => !_isMediaSessionReady;
     public Task PauseAudio() => Task.CompletedTask;
     public Task ResumeAudio() => Task.CompletedTask;
@@ -163,7 +220,7 @@ public abstract class BaseAudioEndPoint : IAudioSource, IAudioSink
     {
         _isStarted = true;
         _isMediaSessionReady = true;
-        _rtpAudioChannel = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(50)
+        _rtpAudioChannel = Channel.CreateBounded<(byte[] Pcm, int SampleRateHz)>(new BoundedChannelOptions(50)
         {
             FullMode = BoundedChannelFullMode.DropOldest,
             SingleReader = true,
@@ -187,18 +244,40 @@ public abstract class BaseAudioEndPoint : IAudioSource, IAudioSink
     }
 
     /// <summary>
-    /// Send a 160-byte PCMU frame outbound. When continuous keep-alive is enabled, this queues
-    /// onto the paced sender's existing 20ms cadence; otherwise it sends immediately.
+    /// Send one 20ms frame of raw 16-bit mono PCM outbound. Resamples to the negotiated format's
+    /// rate if pcmSampleRateHz doesn't already match it, then encodes with whichever codec was
+    /// actually negotiated (PCMU or, if wideband audio is enabled and the far end agreed, G.722)
+    /// before handing the encoded bytes to ExternalAudioSourceEncodedSample (paced via
+    /// RtpPacedSender if continuous keep-alive is enabled, otherwise sent immediately).
     /// </summary>
-    protected void SendAudioFrame(byte[] pcmuFrame)
+    protected void SendAudioFrame(byte[] pcm, int pcmSampleRateHz)
     {
+        short[] samples = new short[pcm.Length / 2];
+        Buffer.BlockCopy(pcm, 0, samples, 0, samples.Length * 2);
+
+        if (pcmSampleRateHz != _negotiatedSendFormat.ClockRate)
+        {
+            samples = PcmResampler.Resample(samples, pcmSampleRateHz, _negotiatedSendFormat.ClockRate);
+        }
+
+        byte[] encoded;
+        try
+        {
+            encoded = _audioEncoder.EncodeAudio(samples, _negotiatedSendFormat);
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, $"[{GetType().Name}] Failed to encode outbound frame as {_negotiatedSendFormat.FormatName}.");
+            return;
+        }
+
         if (_enableContinuousKeepAlive)
         {
-            _keepAlivePacedSender.Enqueue(pcmuFrame);
+            _keepAlivePacedSender.Enqueue(encoded);
         }
         else
         {
-            ExternalAudioSourceEncodedSample(160, pcmuFrame);
+            ExternalAudioSourceEncodedSample((uint)(pcmSampleRateHz / 50), encoded); // 50 frames/sec == 20ms/frame
         }
     }
     public Task StartAudioSink() => StartAudio();
@@ -224,6 +303,14 @@ public abstract class BaseAudioEndPoint : IAudioSource, IAudioSink
         {
             _keepAliveSenderStarted = false;
             await _keepAlivePacedSender.Stop();
+        }
+        // CloseAudio(), like StartAudio(), can be invoked twice (via both CloseAudioSink() and
+        // CloseAudioSource()) since this object implements both interfaces -- guard against
+        // double-disposing the codec state.
+        if (!_audioEncoderDisposed)
+        {
+            _audioEncoderDisposed = true;
+            _audioEncoder.Dispose();
         }
     }
     public AudioFormat GetAudioSourceFormat() => _supportedFormats[0];
