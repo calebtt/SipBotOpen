@@ -10,3 +10,7 @@ SipBot/log.txt
 /MinimalVadTest/bin
 /SipBot/bin
 /SipBotLib/bin
+SipBot/sipsettings.json
+SipBot/sttsettings.json
+SipBotTestMs/sipsettings.json
+SipBotTestMs/sttsettings.json

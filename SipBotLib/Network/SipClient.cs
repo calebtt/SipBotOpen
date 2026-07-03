@@ -37,6 +37,7 @@ public class SipClient : IDisposable
     // Thread safety and state management
     private readonly object _lockObject = new object();
     private volatile bool _isDisposed = false;
+    private volatile bool _isShutdown = false;
     private volatile bool _isRegistered = false;
     private int _reconnectionAttempts = 0;
     private Timer? _healthCheckTimer;
@@ -228,7 +229,11 @@ public class SipClient : IDisposable
 
         try
         {
-            _pendingIncomingCall = _userAgent.AcceptCall(sipRequest);
+            var acceptedCall = _userAgent.AcceptCall(sipRequest);
+            lock (_lockObject)
+            {
+                _pendingIncomingCall = acceptedCall;
+            }
             Log.Information($"Accepted incoming call from {sipRequest.Header.From}");
         }
         catch (Exception ex)
@@ -246,7 +251,13 @@ public class SipClient : IDisposable
             throw new ObjectDisposedException(nameof(SipClient));
         }
 
-        if (_pendingIncomingCall == null)
+        SIPServerUserAgent? pendingCall;
+        lock (_lockObject)
+        {
+            pendingCall = _pendingIncomingCall;
+        }
+
+        if (pendingCall == null)
         {
             StatusMessage?.Invoke(this, "There was no pending call available to answer.");
             return false;
@@ -254,7 +265,7 @@ public class SipClient : IDisposable
 
         try
         {
-            var sipRequest = _pendingIncomingCall.ClientTransaction.TransactionRequest;
+            var sipRequest = pendingCall.ClientTransaction.TransactionRequest;
 
             bool hasAudio = true;
             bool hasVideo = false;
@@ -266,10 +277,17 @@ public class SipClient : IDisposable
                 hasVideo = offerSDP.Media.Any(x => x.Media == SDPMediaTypesEnum.video && x.MediaStreamStatus != MediaStreamStatusEnum.Inactive);
             }
 
-            _mediaSession = CreateMediaSession(CreateMediaEndPoints(audioSink, audioSource));
+            var mediaSession = CreateMediaSession(CreateMediaEndPoints(audioSink, audioSource));
+            lock (_lockObject)
+            {
+                _mediaSession = mediaSession;
+            }
 
-            bool result = await _userAgent.Answer(_pendingIncomingCall, _mediaSession);
-            _pendingIncomingCall = null;
+            bool result = await _userAgent.Answer(pendingCall, mediaSession);
+            lock (_lockObject)
+            {
+                _pendingIncomingCall = null;
+            }
 
             if (result)
             {
@@ -303,9 +321,10 @@ public class SipClient : IDisposable
         {
             if (_userAgent.IsCallActive)
             {
+                // SIPUserAgent.Hangup() already raises OnCallHungup (wired to CallFinished
+                // in CreateNewUserAgent), which itself raises CallEnded. Don't invoke either
+                // again here or CallEnded/duration get double-counted on every hangup.
                 _userAgent.Hangup();
-                CallFinished(null);
-                CallEnded?.Invoke(this);
                 Log.Information("Call hung up");
             }
         }
@@ -406,10 +425,11 @@ public class SipClient : IDisposable
 
     public void Shutdown()
     {
-        if (_isDisposed)
+        if (_isShutdown)
         {
             return;
         }
+        _isShutdown = true;
 
         try
         {
@@ -417,9 +437,14 @@ public class SipClient : IDisposable
 
             Hangup();
 
-            _mediaSession?.Close("Shutdown");
-            _mediaSession?.Dispose();
-            _mediaSession = null;
+            VoIPMediaSession? mediaSessionToDispose;
+            lock (_lockObject)
+            {
+                mediaSessionToDispose = _mediaSession;
+                _mediaSession = null;
+            }
+            mediaSessionToDispose?.Close("Shutdown");
+            mediaSessionToDispose?.Dispose();
 
             _registrationAgent?.Stop();
 
@@ -452,6 +477,12 @@ public class SipClient : IDisposable
     private VoIPMediaSession CreateMediaSession(MediaEndPoints mediaEndPoints)
     {
         var voipMediaSession = new VoIPMediaSession(mediaEndPoints);
+        // Default (false) drops inbound RTP whose source doesn't exactly match the negotiated SDP
+        // address -- very common against real PBX/trunk providers that relay media from a different
+        // address/port than they advertised (observed live: call answers fine, zero RTP frames ever
+        // arrive, then SIPSorcery's own 30s RTP-timeout hangs up the call). SIPSorcery's own call
+        // examples set this to true for exactly this reason.
+        voipMediaSession.AcceptRtpFromAny = true;
         Log.Information($"[{GetType().Name}] Created with AudioSink={mediaEndPoints.AudioSink.GetType().Name}, AcceptRtpFromAny={voipMediaSession.AcceptRtpFromAny}");
         return voipMediaSession;
     }
@@ -585,16 +616,16 @@ public class SipClient : IDisposable
             Log.Information($"Call ended. Duration: {duration:mm\\:ss}");
         }
 
-        _mediaSession?.Close("Call Finished");
-        _mediaSession?.Dispose();
-        _mediaSession = null;
-
+        VoIPMediaSession? mediaSessionToDispose;
         lock (_lockObject)
         {
+            mediaSessionToDispose = _mediaSession;
+            _mediaSession = null;
             _remotePhoneNumber = null;
+            _pendingIncomingCall = null;
         }
-
-        _pendingIncomingCall = null;
+        mediaSessionToDispose?.Close("Call Finished");
+        mediaSessionToDispose?.Dispose();
         CallEnded?.Invoke(this);
     }
 
@@ -622,11 +653,21 @@ public class SipClient : IDisposable
         {
             var timeSinceLastRegistration = DateTime.UtcNow - _lastSuccessfulRegistration;
 
-            // If we haven't registered successfully in the last 2 minutes, try to re-register
+            // If we haven't registered successfully in the last 2 minutes, try to re-register.
+            // Route through ScheduleReconnection() so this respects the same MaxReconnectionAttempts/
+            // backoff as registration-failure driven reconnects, instead of hammering the server with
+            // an uncapped StartRegistration() call every HealthCheckIntervalMs.
             if (timeSinceLastRegistration.TotalMinutes > 2 && !_isRegistered)
             {
-                Log.Warning("Health check: No successful registration in 2+ minutes, attempting re-registration");
-                StartRegistration();
+                Log.Warning("Health check: No successful registration in 2+ minutes, scheduling re-registration");
+                if (_enableAutoReconnection)
+                {
+                    ScheduleReconnection();
+                }
+                else
+                {
+                    StartRegistration();
+                }
             }
         }
         catch (Exception ex)
@@ -684,11 +725,11 @@ public class SipClient : IDisposable
             return;
         }
 
-        _isDisposed = true;
+        // Run cleanup (which hangs up any active call, disposes the media session,
+        // stops the registration agent/timers, and shuts down the transport) BEFORE
+        // flipping _isDisposed, since Shutdown()/Hangup() early-return once disposed.
         Shutdown();
-
-        _healthCheckTimer?.Dispose();
-        _reconnectionTimer?.Dispose();
+        _isDisposed = true;
 
         Log.Information("SIP Client disposed");
     }
