@@ -2,6 +2,7 @@
 using Serilog;
 using SIPSorceryMedia.Abstractions;
 using System.Net;
+using System.Threading.Channels;
 namespace SipBot;
 
 public abstract class BaseAudioEndPoint : IAudioSource, IAudioSink
@@ -10,6 +11,14 @@ public abstract class BaseAudioEndPoint : IAudioSource, IAudioSink
     protected bool _isStarted = false;
     protected bool _isMediaSessionReady = false;
     protected CancellationTokenSource _processAudioCancellationSource = new();
+
+    // GotAudioRtp is invoked synchronously by the SIP/RTP receive path. Frames are handed off
+    // to this channel and drained by a single background worker, so ProcessAudioAsync() (which
+    // may do real work like STT/echo-cancellation) never blocks the RTP thread. Bounded +
+    // DropOldest keeps memory bounded and favors real-time freshness over completeness if the
+    // consumer falls behind, rather than growing an unbounded backlog.
+    private Channel<byte[]>? _rtpAudioChannel;
+    private Task? _rtpProcessingTask;
 
     public event EncodedSampleDelegate? OnAudioSourceEncodedSample;
     public event RawAudioSampleDelegate? OnAudioSourceRawSample;
@@ -64,8 +73,30 @@ public abstract class BaseAudioEndPoint : IAudioSource, IAudioSink
         byte[] rawBytes = new byte[decodedSamples.Length * 2];
         Buffer.BlockCopy(decodedSamples, 0, rawBytes, 0, rawBytes.Length);
 
-        var task = ProcessAudioAsync(rawBytes);
-        task.Wait(_processAudioCancellationSource.Token);
+        // Hand off for background processing instead of blocking the RTP receive thread.
+        // TryWrite never blocks on a bounded DropOldest channel.
+        _rtpAudioChannel?.Writer.TryWrite(rawBytes);
+    }
+
+    private async Task ProcessAudioChannelAsync(ChannelReader<byte[]> reader, CancellationToken token)
+    {
+        try
+        {
+            await foreach (var pcm in reader.ReadAllAsync(token))
+            {
+                try
+                {
+                    await ProcessAudioAsync(pcm);
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(ex, $"[{GetType().Name}] Exception while processing incoming audio frame.");
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
     }
 
     public virtual void ExternalAudioSourceRawSample(AudioSamplingRatesEnum samplingRate, uint durationMilliseconds, short[] sample) { }
@@ -89,6 +120,13 @@ public abstract class BaseAudioEndPoint : IAudioSource, IAudioSink
     {
         _isStarted = true;
         _isMediaSessionReady = true;
+        _rtpAudioChannel = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(50)
+        {
+            FullMode = BoundedChannelFullMode.DropOldest,
+            SingleReader = true,
+            SingleWriter = false
+        });
+        _rtpProcessingTask = Task.Run(() => ProcessAudioChannelAsync(_rtpAudioChannel.Reader, _processAudioCancellationSource.Token));
         Log.Information($"[{GetType().Name}] StartAudio called, _isStarted={_isStarted}, SupportedFormats={string.Join(", ", _supportedFormats.Select(f => f.FormatName))}");
         return Task.CompletedTask;
     }
@@ -110,6 +148,7 @@ public abstract class BaseAudioEndPoint : IAudioSource, IAudioSink
     {
         _isStarted = false;
         _isMediaSessionReady = false;
+        _rtpAudioChannel?.Writer.TryComplete();
         return Task.CompletedTask;
     }
     public AudioFormat GetAudioSourceFormat() => _supportedFormats[0];

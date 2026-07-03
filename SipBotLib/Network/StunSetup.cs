@@ -19,6 +19,15 @@ public static class StunHelper
 
     public static bool SetupStun(string fallbackIp = "")
     {
+        if (PublicIPAddress != null)
+        {
+            // Already resolved (possibly by an earlier SipClient instance in this process).
+            // STUN lookups are several blocking network round-trips each; don't redo them
+            // for every SipClient constructed.
+            Log.Debug($"STUN public IP already resolved: {PublicIPAddress}. Skipping lookup.");
+            return true;
+        }
+
         foreach (var (server, port) in stunServers)
         {
             try
@@ -45,9 +54,16 @@ public static class StunHelper
         }
 
         // Fallback to hardcoded public IP if all STUN servers fail
-        PublicIPAddress = fallbackIp;
-        PublicIPAddressBytes = IPAddress.Parse(fallbackIp).GetAddressBytes();
-        Log.Error($"All STUN servers failed. Using hardcoded public IP: {PublicIPAddress}");
+        if (!string.IsNullOrWhiteSpace(fallbackIp) && IPAddress.TryParse(fallbackIp, out var parsedFallback))
+        {
+            PublicIPAddress = fallbackIp;
+            PublicIPAddressBytes = parsedFallback.GetAddressBytes();
+            Log.Error($"All STUN servers failed. Using hardcoded public IP: {PublicIPAddress}");
+        }
+        else
+        {
+            Log.Error("All STUN servers failed and no valid fallback IP was provided. Public IP remains unresolved.");
+        }
         return false;
     }
 }
