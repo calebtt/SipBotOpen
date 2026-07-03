@@ -156,6 +156,9 @@ public class SpeechToTextConfig
 {
     [JsonPropertyName("SttModelUrl")]
     public string SttModelUrl { get; set; } = string.Empty;
+
+    [JsonPropertyName("SileroVadModelPath")]
+    public string SileroVadModelPath { get; set; } = "models/silero_vad.onnx";
 }
 
 public class LanguageModelConfig

@@ -22,10 +22,11 @@ public class StreamingVoiceAudioEndPoint : BaseAudioEndPoint, IDisposable
     public StreamingVoiceAudioEndPoint(
         SttProviderStreaming streamingSttClient,
         LlmChat llmClient,
-        TtsStreamer ttsStreamer)
+        TtsStreamer ttsStreamer,
+        string sileroVadModelPath)
     {
         // Compose core with pacer
-        _voiceAgentCore = new VoiceAgentCore(streamingSttClient, llmClient, ttsStreamer, _audioPacer);
+        _voiceAgentCore = new VoiceAgentCore(streamingSttClient, llmClient, ttsStreamer, _audioPacer, sileroVadModelPath);
 
         // Forward events from core
         _voiceAgentCore.OnAudioReplyReady += chunk => OnAudioReplyReady?.Invoke(chunk);
@@ -81,15 +82,19 @@ public class StreamingVoiceAudioEndPoint : BaseAudioEndPoint, IDisposable
 
     /// <summary>
     /// Audio received for internal processing (from cellphone).
-    /// Audio is 8khz 16bit mono PCM (decoded from SIP).
+    /// Audio is 16-bit mono PCM at sampleRateHz (decoded from SIP; this endpoint doesn't opt into
+    /// wideband audio, so today that's always 8kHz PCMU -- see BaseAudioEndPoint's
+    /// enableWidebandAudio remarks for why: the TTS-out path below isn't codec-aware yet).
     /// Enhanced with echo cancellation; delegates VAD/STT to core.
     /// </summary>
-    protected override async Task ProcessAudioAsync(byte[] pcm8Khz)
+    protected override async Task ProcessAudioAsync(byte[] pcm, int sampleRateHz)
     {
         try
         {
             // Resample to 16kHz for processing
-            byte[] pcm16Khz = AudioAlgos.ResamplePcmWithNAudio(pcm8Khz, AudioConstants.SAMPLE_RATE_8KHZ, AudioConstants.SAMPLE_RATE_16KHZ);
+            byte[] pcm16Khz = sampleRateHz == AudioConstants.SAMPLE_RATE_16KHZ
+                ? pcm
+                : AudioAlgos.ResamplePcmWithNAudio(pcm, sampleRateHz, AudioConstants.SAMPLE_RATE_16KHZ);
 
             // Delegate to core for VAD (before WebRTC for faster onset)
             _voiceAgentCore.ProcessIncomingAudioChunk(pcm16Khz ?? Array.Empty<byte>());

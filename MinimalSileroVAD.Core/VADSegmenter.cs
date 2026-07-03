@@ -163,7 +163,7 @@ public sealed class VadSpeechSegmenter : IDisposable
     {
         if (!_isDisposed)
         {
-            //_vad.Dispose();
+            _model.Dispose();
             _isDisposed = true;
             Log.Information("VadSpeechSegmenter disposed.");
         }
