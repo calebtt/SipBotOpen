@@ -35,7 +35,7 @@
     <PackageReference Include="Serilog.Sinks.Console" Version="6.0.0" />
     <PackageReference Include="Serilog.Sinks.Debug" Version="3.0.0" />
     <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
-    <PackageReference Include="SIPSorceryMedia.Encoders" Version="8.0.7" />
+    <PackageReference Include="SIPSorceryMedia.Encoders" Version="10.0.4" />
     <PackageReference Include="SpeexDSPSharp" Version="1.2.2" />
     <PackageReference Include="SpeexDSPSharp.Core" Version="1.2.1" />
     <PackageReference Include="SpeexDSPSharp.Natives" Version="1.2.1.1" />
