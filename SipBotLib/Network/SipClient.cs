@@ -477,6 +477,12 @@ public class SipClient : IDisposable
     private VoIPMediaSession CreateMediaSession(MediaEndPoints mediaEndPoints)
     {
         var voipMediaSession = new VoIPMediaSession(mediaEndPoints);
+        // Default (false) drops inbound RTP whose source doesn't exactly match the negotiated SDP
+        // address -- very common against real PBX/trunk providers that relay media from a different
+        // address/port than they advertised (observed live: call answers fine, zero RTP frames ever
+        // arrive, then SIPSorcery's own 30s RTP-timeout hangs up the call). SIPSorcery's own call
+        // examples set this to true for exactly this reason.
+        voipMediaSession.AcceptRtpFromAny = true;
         Log.Information($"[{GetType().Name}] Created with AudioSink={mediaEndPoints.AudioSink.GetType().Name}, AcceptRtpFromAny={voipMediaSession.AcceptRtpFromAny}");
         return voipMediaSession;
     }

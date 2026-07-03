@@ -20,18 +20,41 @@ public abstract class BaseAudioEndPoint : IAudioSource, IAudioSink
     private Channel<byte[]>? _rtpAudioChannel;
     private Task? _rtpProcessingTask;
 
+    // Opt-in continuous outbound RTP: many real PBX/trunk providers sit behind their own NAT and
+    // won't relay any RTP back to us until they've seen a packet from us on that same flow (plus
+    // some NATs/firewalls on our own side won't admit a brand-new inbound UDP flow at all without
+    // one first going out). A purely reactive audio source that only sends once it has something
+    // to say can deadlock: nothing goes out -> nothing ever gets let back in -> nothing ever
+    // arrives to react to. Confirmed live: without this, calls answer fine, zero RTP is ever
+    // received, and SIPSorcery's own 30s RTP-timeout silently hangs up the call. Enabling this
+    // starts a background sender the moment the call answers, streaming silence (or real audio,
+    // via SendAudioFrame) every 20ms so the pinhole opens/stays open immediately regardless of
+    // whether the subclass has anything to say yet.
+    private readonly bool _enableContinuousKeepAlive;
+    private readonly RtpPacedSender _keepAlivePacedSender = new();
+    private volatile bool _keepAliveSenderStarted;
+
     public event EncodedSampleDelegate? OnAudioSourceEncodedSample;
     public event RawAudioSampleDelegate? OnAudioSourceRawSample;
     public event SourceErrorDelegate? OnAudioSourceError;
     public event SourceErrorDelegate? OnAudioSinkError;
     public event EncodedSampleDelegate? OnAudioSinkSample;
 
-    public BaseAudioEndPoint()
+    /// <param name="enableContinuousKeepAlive">
+    /// Start a continuous 20ms-paced outbound RTP stream (silence by default) the moment a call
+    /// answers, to keep a NAT/firewall pinhole open for inbound media. Defaults to false to avoid
+    /// changing behavior for existing subclasses; recommended true for anything calling out to a
+    /// real PBX/trunk from behind NAT. When enabled, use SendAudioFrame() instead of
+    /// ExternalAudioSourceEncodedSample() so outbound audio is paced onto the same cadence instead
+    /// of bursting.
+    /// </param>
+    public BaseAudioEndPoint(bool enableContinuousKeepAlive = false)
     {
         _supportedFormats = new List<AudioFormat>
         {
             new AudioFormat(0, "PCMU", 8000, 1)
         };
+        _enableContinuousKeepAlive = enableContinuousKeepAlive;
     }
 
     // Forwards (invokes) the data on OnAudioSourceEncodedSample, which actually tells the SIP lib to send data.
@@ -127,8 +150,36 @@ public abstract class BaseAudioEndPoint : IAudioSource, IAudioSink
             SingleWriter = false
         });
         _rtpProcessingTask = Task.Run(() => ProcessAudioChannelAsync(_rtpAudioChannel.Reader, _processAudioCancellationSource.Token));
+
+        // VoIPMediaSession invokes StartAudio() via BOTH StartAudioSink() and StartAudioSource()
+        // (this object implements both interfaces), so guard against starting the pacer twice --
+        // RtpPacedSender.Start() throws if already running.
+        if (_enableContinuousKeepAlive && !_keepAliveSenderStarted)
+        {
+            _keepAliveSenderStarted = true;
+            _keepAlivePacedSender.SendAction = ExternalAudioSourceEncodedSample;
+            _keepAlivePacedSender.Start();
+            Log.Information($"[{GetType().Name}] Continuous RTP keep-alive started.");
+        }
+
         Log.Information($"[{GetType().Name}] StartAudio called, _isStarted={_isStarted}, SupportedFormats={string.Join(", ", _supportedFormats.Select(f => f.FormatName))}");
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Send a 160-byte PCMU frame outbound. When continuous keep-alive is enabled, this queues
+    /// onto the paced sender's existing 20ms cadence; otherwise it sends immediately.
+    /// </summary>
+    protected void SendAudioFrame(byte[] pcmuFrame)
+    {
+        if (_enableContinuousKeepAlive)
+        {
+            _keepAlivePacedSender.Enqueue(pcmuFrame);
+        }
+        else
+        {
+            ExternalAudioSourceEncodedSample(160, pcmuFrame);
+        }
     }
     public Task StartAudioSink() => StartAudio();
     public Task StartAudioSource() => StartAudio();
@@ -144,12 +195,16 @@ public abstract class BaseAudioEndPoint : IAudioSource, IAudioSink
     {
         _supportedFormats.RemoveAll(f => !filter(f));
     }
-    public virtual Task CloseAudio()
+    public virtual async Task CloseAudio()
     {
         _isStarted = false;
         _isMediaSessionReady = false;
         _rtpAudioChannel?.Writer.TryComplete();
-        return Task.CompletedTask;
+        if (_keepAliveSenderStarted)
+        {
+            _keepAliveSenderStarted = false;
+            await _keepAlivePacedSender.Stop();
+        }
     }
     public AudioFormat GetAudioSourceFormat() => _supportedFormats[0];
     public bool HasEncodedAudioSubscribers() => OnAudioSourceEncodedSample != null;
