@@ -22,10 +22,11 @@ public class StreamingVoiceAudioEndPoint : BaseAudioEndPoint, IDisposable
     public StreamingVoiceAudioEndPoint(
         SttProviderStreaming streamingSttClient,
         LlmChat llmClient,
-        TtsStreamer ttsStreamer)
+        TtsStreamer ttsStreamer,
+        string sileroVadModelPath)
     {
         // Compose core with pacer
-        _voiceAgentCore = new VoiceAgentCore(streamingSttClient, llmClient, ttsStreamer, _audioPacer);
+        _voiceAgentCore = new VoiceAgentCore(streamingSttClient, llmClient, ttsStreamer, _audioPacer, sileroVadModelPath);
 
         // Forward events from core
         _voiceAgentCore.OnAudioReplyReady += chunk => OnAudioReplyReady?.Invoke(chunk);

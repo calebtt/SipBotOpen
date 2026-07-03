@@ -1,5 +1,5 @@
-﻿using Serilog;
-using WebRtcVadSharp;
+﻿using MinimalSileroVAD.Core;
+using Serilog;
 
 namespace SipBot;
 
@@ -11,6 +11,7 @@ public class VoiceAgentCore
     private readonly LlmChat _llmChat;
     private readonly TtsStreamer _ttsStreamer;
     private readonly RtpAudioPacer _audioPacer;
+    private readonly string _sileroVadModelPath;
 
     private CancellationTokenSource? _cancellationTokenSource = null;
     private VadSpeechSegmenter? _vad = null;
@@ -27,12 +28,16 @@ public class VoiceAgentCore
         SttProviderStreaming streamingSttClient,
         LlmChat llmChat,
         TtsStreamer ttsStreamer,
-        RtpAudioPacer audioPacer)
+        RtpAudioPacer audioPacer,
+        string sileroVadModelPath)
     {
         _streamingSttClient = streamingSttClient ?? throw new ArgumentNullException(nameof(streamingSttClient));
         _llmChat = llmChat ?? throw new ArgumentNullException(nameof(llmChat));
         _ttsStreamer = ttsStreamer ?? throw new ArgumentNullException(nameof(ttsStreamer));
         _audioPacer = audioPacer ?? throw new ArgumentNullException(nameof(audioPacer));
+        _sileroVadModelPath = string.IsNullOrEmpty(sileroVadModelPath)
+            ? throw new ArgumentException("Silero VAD model path is required.", nameof(sileroVadModelPath))
+            : sileroVadModelPath;
 
         _ttsStreamer.OnEchoRegistrationRequired += RegisterTtsAudioForEchoCancellation;
         _ttsStreamer.OnAudioChunkReady += (sender, chunk) => OnAudioReplyReady?.Invoke(chunk!);
@@ -52,7 +57,7 @@ public class VoiceAgentCore
             _cancellationTokenSource = new CancellationTokenSource();
 
             // Initialize VAD for speech segmentation
-            _vad = new();
+            _vad = new(_sileroVadModelPath);
 
             bool volumeFilterActive = false; // Local; use volatile if multi-threaded contention
 
@@ -130,7 +135,7 @@ public class VoiceAgentCore
         if (_vad == null || _cancellationTokenSource?.IsCancellationRequested == true)
             return;
 
-        _vad.PushFrame(pcm16Khz, SampleRate.Is16kHz, FrameLength.Is20ms);
+        _vad.PushFrame(pcm16Khz, sampleRate: 16000, frameLengthMs: 20);
     }
 
     /// <summary>
