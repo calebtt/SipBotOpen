@@ -2,7 +2,6 @@
 using KokoroSharp.Core;
 using KokoroSharp.Utilities;
 using Microsoft.ML.OnnxRuntime;
-using NAudio.Codecs;
 using NAudio.Wave;
 using Serilog;
 using System.Buffers; // For ArrayPool (zero-alloc)
@@ -51,67 +50,29 @@ public static partial class Algos
 
     /// <summary>
     /// Convert a WAV file (as byte array) to raw PCM (16-bit, mono) at a specified target sample rate.
-    /// Note that it reads the WAV file header for information on the source audio's sample rate.
+    /// Delegates to SipBotLib's cross-platform path (WDL resampler — works on Linux; MediaFoundation does not).
     /// </summary>
-    /// <param name="wavAudio">WAV file data</param>
-    /// <param name="targetSampleRateHz">Desired output sample rate (e.g. 8000, 16000)</param>
-    /// <returns>Raw PCM byte array (16-bit mono)</returns>
-    public static byte[] ConvertWavToPcm(byte[] wavAudio, int targetSampleRateHz)
-    {
-        try
-        {
-            using var wavStream = new MemoryStream(wavAudio);
-            using var reader = new WaveFileReader(wavStream);
-
-            var inputFormat = reader.WaveFormat;
-            var targetFormat = new WaveFormat(targetSampleRateHz, 16, 1);
-
-            using var resampler = new MediaFoundationResampler(reader, targetFormat)
-            {
-                ResamplerQuality = 60
-            };
-
-            using var outStream = new MemoryStream();
-            byte[] buffer = new byte[4096];
-            int bytesRead;
-            while ((bytesRead = resampler.Read(buffer, 0, buffer.Length)) > 0)
-            {
-                outStream.Write(buffer, 0, bytesRead);
-            }
-
-            byte[] rawPcm = outStream.ToArray();
-            Log.Debug($"Converted WAV to PCM: {rawPcm.Length} bytes, {targetSampleRateHz} Hz, 16-bit mono");
-            return rawPcm;
-        }
-        catch (Exception ex)
-        {
-            Log.Error(ex, "Failed to convert WAV to raw PCM.");
-            return Array.Empty<byte>();
-        }
-    }
+    public static byte[] ConvertWavToPcm(byte[] wavAudio, int targetSampleRateHz) =>
+        AudioAlgos.ConvertWavToPcm(wavAudio, targetSampleRateHz);
 
     /// <summary>
-    /// Encodes 16 bit mono PCM data, irrespective of sample rate (this encoding algo doesn't depend on it.)
+    /// Encodes 16-bit mono PCM to G.711 μ-law (PCMU). Rate-independent.
     /// </summary>
-    public static byte[] EncodePcmToPcmuWithNAudio(byte[] pcmSamples)
+    public static byte[] EncodePcmToPcmuWithNAudio(byte[] pcmSamples) =>
+        AudioAlgos.EncodePcmToPcmuWithNAudio(pcmSamples);
+
+    /// <summary>
+    /// Kokoro returns 22.05 kHz 16-bit mono PCM. Resample to 8 kHz and encode PCMU for SIP.
+    /// Avoids a temp WAV + MediaFoundation path that fails on Linux.
+    /// </summary>
+    public static byte[] KokoroPcmToPcmu8k(byte[] rawPcm22050)
     {
-        if (pcmSamples.Length % 2 != 0)
-        {
-            Log.Warning($"[EncodePcmToPcmuWithNAudio] PCM samples length {pcmSamples.Length} is not even, trimming last byte.");
-            Array.Resize(ref pcmSamples, pcmSamples.Length - 1);
-        }
+        if (rawPcm22050 == null || rawPcm22050.Length == 0)
+            return Array.Empty<byte>();
 
-        int sampleCount = pcmSamples.Length / 2;
-        byte[] pcmu = new byte[sampleCount];
-
-        for (int i = 0; i < sampleCount; i++)
-        {
-            // Combine two bytes into one short (little-endian)
-            short sample = (short)(pcmSamples[i * 2] | (pcmSamples[i * 2 + 1] << 8));
-            pcmu[i] = MuLawEncoder.LinearToMuLawSample(sample);
-        }
-
-        return pcmu;
+        const int kokoroRate = 22050;
+        byte[] pcm8k = AudioAlgos.ResamplePcmWithNAudio(rawPcm22050, kokoroRate, 8000);
+        return AudioAlgos.EncodePcmToPcmuWithNAudio(pcm8k);
     }
 
 }
@@ -181,10 +142,7 @@ public static class TtsProviderStreaming
         }
         else
         {
-            // Create temp WAV for AudioAlgos pipeline (ensures fmt chunk for NAudio)
-            var tempWavBytes = Algos.CreateWavFromPcm(rawPcmBytes, 22050);
-            byte[] pcm8kHz = Algos.ConvertWavToPcm(tempWavBytes, 8000);
-            outputBytes = Algos.EncodePcmToPcmuWithNAudio(pcm8kHz);
+            outputBytes = Algos.KokoroPcmToPcmu8k(rawPcmBytes);
             Log.Debug($"Synthesized and converted to 8kHz PCMU: {outputBytes.Length} bytes");
         }
 
@@ -262,9 +220,7 @@ public static class TtsProviderStreaming
             if (rawPcm.Length == 0)
                 return Array.Empty<byte>();
 
-            var tempWav = Algos.CreateWavFromPcm(rawPcm, 22050);
-            var pcm8k = Algos.ConvertWavToPcm(tempWav, 8000);
-            var chunk = Algos.EncodePcmToPcmuWithNAudio(pcm8k);
+            var chunk = Algos.KokoroPcmToPcmu8k(rawPcm);
 
             if (logRtf)
             {
