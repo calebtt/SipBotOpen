@@ -14,3 +14,6 @@ SipBot/sipsettings.json
 SipBot/sttsettings.json
 SipBotTestMs/sipsettings.json
 SipBotTestMs/sttsettings.json
+SipBot/profiles/local.json
+SipBot/kokoro.onnx
+SipBot/models/
