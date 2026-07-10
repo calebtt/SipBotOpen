@@ -198,10 +198,23 @@ public class StreamingVoiceSipBotClient
         var transport = Algos.CreateSipTransport(sipSettings.Port);
         var sipClient = new SipClient(transport, sipSettings);
 
-        // Event handlers, log only (answer/end/incoming are wired on Sip above)
-        sipClient.StatusMessage += (client, message) => Log.Debug($"Status: {message}");
+        // Event handlers (answer/end/incoming are wired on Sip above)
+        sipClient.StatusMessage += (client, message) =>
+        {
+            // SipClient logs registration success at Debug; surface it here for ops visibility.
+            if (message.Contains("Registration successful", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("Registration failed", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("Registration temporary", StringComparison.OrdinalIgnoreCase))
+                Log.Information("SIP: {Message}", message);
+            else
+                Log.Debug("SIP status: {Message}", message);
+        };
+        sipClient.RegistrationStatusChanged += client =>
+            Log.Information("SIP registration state: registered={Registered} lastOk={LastOk:u}",
+                client.IsRegistered, client.LastSuccessfulRegistration);
         sipClient.RemotePutOnHold += (client) => Log.Information("Remote party put us on hold.");
         sipClient.RemoteTookOffHold += (client) => Log.Information("Remote party took us off hold.");
+        sipClient.ErrorOccurred += (client, ex) => Log.Error(ex, "SIP client error");
 
         // OPTIONS qualify is answered inside SipClient (SipBotLib) — do not double-reply here.
         sipClient.StartRegistration();

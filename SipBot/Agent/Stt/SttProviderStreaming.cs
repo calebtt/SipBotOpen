@@ -232,6 +232,21 @@ public class SttProviderStreaming : IDisposable
                 return;
             }
             Array.Resize(ref pcmBytes, bytesRead); // Trim if partial read
+
+            // Whisper is unreliable on very short clips (single-word telephony). Pad with
+            // silence to a minimum duration so the model has enough context; zeros are silence
+            // in 16-bit PCM. 16 kHz mono × 2 bytes × 1.0s = 32000 bytes.
+            const int minPcmBytes = 16_000 * 2 * 1;
+            if (pcmBytes.Length > 0 && pcmBytes.Length < minPcmBytes)
+            {
+                var padded = new byte[minPcmBytes];
+                Array.Copy(pcmBytes, 0, padded, 0, pcmBytes.Length);
+                Log.Information(
+                    "Streaming STT: Padded short segment from {FromMs:F0}ms to {ToMs:F0}ms for Whisper",
+                    pcmBytes.Length / 32.0, minPcmBytes / 32.0);
+                pcmBytes = padded;
+            }
+
             Log.Debug("Streaming STT: Processing chunk of {0} bytes", pcmBytes.Length);
 
             using var wavStream = Algos.PcmToWavStream(pcmBytes, _waveFormat);
