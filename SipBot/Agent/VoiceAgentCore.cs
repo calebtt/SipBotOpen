@@ -59,7 +59,20 @@ public class VoiceAgentCore
             // The library's own default (32ms, the Silero model's native inference window) is
             // unrelated to and independent of this -- PushFrame's internal windowing handles that
             // regardless of the caller's chunk size.
-            _vad = new VadSpeechSegmenter(new VadOptions { MsPerFrame = 20 });
+            //
+            // Telephony defaults: library BeginOfUtteranceMs=500 requires ~half a second of
+            // *consecutive* speech frames before an utterance even starts. Single-word answers
+            // ("yes"/"no"/"ok"/"what") are often 150-350ms of energy and never fire SpeechStarted.
+            // Lower begin threshold; keep pre-speech padding so the word onset is still in the
+            // segment; slightly snappier end silence for turn-taking.
+            _vad = new VadSpeechSegmenter(new VadOptions
+            {
+                MsPerFrame = 20,
+                BeginOfUtteranceMs = 160, // ~8 × 20ms frames
+                EndOfUtteranceMs = 400,
+                PreSpeechMs = 800,
+                Threshold = 0.25f,
+            });
 
             bool volumeFilterActive = false; // Local; use volatile if multi-threaded contention
 

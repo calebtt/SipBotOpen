@@ -92,14 +92,15 @@ public static partial class Algos
         return string.Join(" ", sentences.Select(s => s.Sentence?.Trim() ?? null));
     }
 
-    // Returns false if the sentence is empty or consists of CC phrases like [BLANK_AUDIO] or (crowd murmuring)
+    // Returns false if the sentence is empty or consists of CC phrases like [BLANK_AUDIO] or (crowd murmuring).
+    // Single-token replies ("no", "yes", "I", "ok") must remain speakable — min length is 1 after trim.
     public static bool IsTranscriptionSpeakable(string sentence)
     {
         if (string.IsNullOrWhiteSpace(sentence))
             return false;
 
         string trimmed = sentence.Trim();
-        if (trimmed.Length < 2) // Need at least 2 chars for brackets/parentheses, but still not speakable.
+        if (trimmed.Length < 1)
             return false;
 
         bool isBracketed = trimmed.StartsWith("[") && trimmed.EndsWith("]");
@@ -266,7 +267,8 @@ public class SttProviderStreaming : IDisposable
     {
         if (string.IsNullOrWhiteSpace(segment.Text?.Trim()) || !Algos.IsTranscriptionSpeakable(segment.Text.Trim()))
         {
-            Log.Debug("Streaming STT: Skipping non-speakable segment: {0}", segment.Text);
+            // Info so short-word drops (or Whisper [BLANK_AUDIO]) are visible in console during call tests
+            Log.Information("Streaming STT: Skipping non-speakable segment: '{0}'", (string?)segment.Text);
             return;
         }
 
