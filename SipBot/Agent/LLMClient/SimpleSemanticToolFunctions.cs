@@ -36,12 +36,23 @@ public class SimpleSemanticToolFunctions
     /// </summary>
     public SimpleSemanticToolFunctions(
         Func<Task>? hangupAction = null,
-        Func<string, Task<bool>>? transferCallAction = null)
+        Func<string, Task<bool>>? transferCallAction = null,
+        IEnumerable<ExtensionSchema>? extensions = null)
         //BulkVsSmsService? smsService = null)
     {
         _hangupAction = hangupAction ?? (() => Task.CompletedTask);
         _transferCallAction = transferCallAction ?? ((string extension) => Task.FromResult(false));
         //_smsService = smsService;
+
+        if (extensions != null)
+        {
+            foreach (var ext in extensions)
+            {
+                if (string.IsNullOrWhiteSpace(ext.Name) || string.IsNullOrWhiteSpace(ext.Number))
+                    continue;
+                _extensionMap[ext.Name] = ext.Number;
+            }
+        }
     }
 
     [KernelFunction("send_notification")]

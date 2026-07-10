@@ -98,9 +98,12 @@ public static class BotSettings
         if (string.IsNullOrEmpty(Settings.LanguageModel.ApiKey))
             throw new InvalidOperationException("LanguageModel.ApiKey is required.");
 
-        var sipIndex = Settings.ProfileExtension.SipAccountIndex;
+        // Program selects the listen account via LanguageModel.ListenSipAccountIndex
+        // (ProfileExtension.SipAccountIndex is legacy and not used at runtime).
+        var sipIndex = Settings.LanguageModel.ListenSipAccountIndex;
         if (sipIndex < 0 || sipIndex >= Settings.SipSettings.Configs.Count)
-            throw new InvalidOperationException($"ProfileExtension.SipAccountIndex ({sipIndex}) is out of bounds for {Settings.SipSettings.Configs.Count} SIP configs.");
+            throw new InvalidOperationException(
+                $"LanguageModel.ListenSipAccountIndex ({sipIndex}) is out of bounds for {Settings.SipSettings.Configs.Count} SIP configs.");
     }
 
     public static async Task ReloadAsync(string? profileName = null, string? profilesDirectory = null) =>

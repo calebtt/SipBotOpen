@@ -95,7 +95,7 @@ public class Program
         // Parse profile from args/env (modern: Use args parser or IOptions)
         string? profile = args.FirstOrDefault(a => a.StartsWith("--profile="))?.Split('=')[1]
             ?? Environment.GetEnvironmentVariable("BOT_PROFILE")
-            ?? "vendpartners"; // Sensible default
+            ?? "personal"; // Matches profiles/personal.json shipped with the repo
 
         // Load once, async (no legacy string param)
         await BotSettings.LoadSettingsFromJsonAsync(profileName: profile, profilesDirectory: "profiles");

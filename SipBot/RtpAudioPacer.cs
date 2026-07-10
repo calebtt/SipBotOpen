@@ -52,7 +52,7 @@ public class RtpAudioPacer
         Log.Information($"[{nameof(RtpAudioPacer)}] SIP audio pacer attached to {audioEndPoint.GetType().Name}.");
     }
 
-    public async Task Detach(BaseAudioEndPoint audioEndPoint)
+    public async Task DetachAsync(BaseAudioEndPoint audioEndPoint)
     {
         if (!_isAttached)
             return;

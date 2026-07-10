@@ -94,7 +94,7 @@ cd SipBot
 dotnet run
 ```
 
-By default it loads the `vendpartners` profile; override with `--profile=<name>` or the `BOT_PROFILE` environment variable. On startup it registers with your SIP server using the account selected by `LanguageModel.ListenSipAccountIndex` in the active profile. Route incoming calls to that extension and call in to test.
+By default it loads the `personal` profile; override with `--profile=<name>` or the `BOT_PROFILE` environment variable. On startup it registers with your SIP server using the account selected by `LanguageModel.ListenSipAccountIndex` in the active profile. Route incoming calls to that extension and call in to test.
 
 ## Configuration reference
 

@@ -59,7 +59,8 @@ public class StreamingVoiceSipBotClient
 
         _toolFunctions = new(
             async () => { Sip.Hangup(); await StopAsync(); },
-            async (x) => { return await Sip.BlindTransferAsync(x, TimeSpan.FromSeconds(5)); }
+            async (x) => { return await Sip.BlindTransferAsync(x, TimeSpan.FromSeconds(5)); },
+            BotSettings.Settings.LanguageModel.Extensions
         );
         _llmClient = new LlmChat(BotSettings.Settings.LanguageModel, _toolFunctions, Algos.BuildKernel(BotSettings.Settings.LanguageModel));
 
@@ -75,8 +76,14 @@ public class StreamingVoiceSipBotClient
 
         (Sip, _) = BuildSipClient(sipConfig);  // Use selected config
 
-        Sip!.CallEnded += (obj) => { Sip_CallEnded(obj).Wait(); };
-        Sip!.CallAnswer += (obj) => { Sip_CallAnswer(obj).Wait(); };
+        // Prefer SipClient events over blocking .Wait() on handlers (deadlock risk).
+        Sip.CallEnded += OnCallEnded;
+        Sip.CallAnswer += OnCallAnswered;
+        // Fire-and-forget Task — avoids async void event handlers (VSTHRD100).
+        Sip.IncomingCall += (client, invite) =>
+        {
+            _ = HandleIncomingCallAsync(client, invite);
+        };
 
         _ = InitializeWelcomeMessageAsync();
     }
@@ -191,71 +198,92 @@ public class StreamingVoiceSipBotClient
         var transport = Algos.CreateSipTransport(sipSettings.Port);
         var sipClient = new SipClient(transport, sipSettings);
 
-        // Event handlers, log only
+        // Event handlers, log only (answer/end/incoming are wired on Sip above)
         sipClient.StatusMessage += (client, message) => Log.Debug($"Status: {message}");
-        sipClient.CallAnswer += (client) => Log.Information("Call answered!");
-        sipClient.CallEnded += (client) => Log.Information("Call ended.");
         sipClient.RemotePutOnHold += (client) => Log.Information("Remote party put us on hold.");
         sipClient.RemoteTookOffHold += (client) => Log.Information("Remote party took us off hold.");
 
-        transport = GetSipTransportWithHandlers(transport, sipClient);
+        // OPTIONS qualify is answered inside SipClient (SipBotLib) — do not double-reply here.
         sipClient.StartRegistration();
 
         return (sipClient, transport);
     }
 
-    private SIPTransport GetSipTransportWithHandlers(SIPTransport sipTransport, SipClient sipClient)
+    /// <summary>
+    /// Handles INVITE via SipClient.IncomingCall (same path as LiveCallTest).
+    /// </summary>
+    private async Task HandleIncomingCallAsync(SipClient sipClient, SIPRequest sipRequest)
     {
-        ArgumentNullException.ThrowIfNull(sipTransport);
-        ArgumentNullException.ThrowIfNull(sipClient);
-
-        sipTransport.SIPTransportRequestReceived += async (localSIPEndPoint, remoteEndPoint, sipRequest) =>
+        try
         {
-            if (sipRequest.Method == SIPMethodsEnum.OPTIONS)
+            Log.Information($"Incoming call from {sipRequest.Header.From.FriendlyDescription()}");
+            sipClient.Accept(sipRequest);
+
+            // Reset LLM state for new call
+            _llmClient.ClearHistory();
+            if (!string.IsNullOrWhiteSpace(_welcomeMessageText))
+                _llmClient.AddAssistantMessage(_welcomeMessageText);
+
+            // Tear down previous call endpoint if still around (back-to-back calls)
+            if (_audioEndPoint != null)
             {
-                var optionsResponse = SIPResponse.GetResponse(sipRequest, SIPResponseStatusCodesEnum.Ok, null);
-                await sipTransport.SendResponseAsync(optionsResponse);
-                Log.Debug("Responded to SIP OPTIONS ping.");
-            }
-            else if (sipRequest.Method == SIPMethodsEnum.INVITE)
-            {
-                Log.Information($"Incoming call from {sipRequest.Header.From.FriendlyDescription()}");
-                sipClient.Accept(sipRequest);
-
-                // Reset LLM state for new call
-                _llmClient.ClearHistory();
-                _llmClient.AddAssistantMessage(_welcomeMessageText);  // Add welcome as assistant message
-
-                var eps = new StreamingVoiceAudioEndPoint(_streamingSttClient, _llmClient, _ttsProvider);
-                await eps.InitializeAsync();
-                _audioEndPoint = eps;
-
-                // Wait for welcome, bounded retry
-                if (_welcomeMessagePcmu == null)
+                try
                 {
-                    Log.Information("Waiting for welcome message...");
-                    const int maxWait = 50;  // 5s
-                    for (int waitCount = 0; waitCount < maxWait && _welcomeMessagePcmu == null; waitCount++)
-                    {
-                        await Task.Delay(100);
-                    }
-                    Log.Information(_welcomeMessagePcmu != null ? "Welcome ready" : "Welcome not ready; proceeding without");
+                    await _audioEndPoint.ShutdownAsync().ConfigureAwait(false);
+                    _audioEndPoint.Dispose();
                 }
-
-                var answered = await sipClient.Answer(eps, eps);
-                Log.Information(answered ? "Call answered successfully." : "Failed to answer call.");
-
-                _ = PlayWelcomeMessage();
+                catch (Exception ex)
+                {
+                    Log.Warning(ex, "Error disposing previous audio endpoint before new call");
+                }
+                _audioEndPoint = null;
             }
-            else if (sipRequest.Method == SIPMethodsEnum.BYE)
+
+            var eps = new StreamingVoiceAudioEndPoint(_streamingSttClient, _llmClient, _ttsProvider);
+            await eps.InitializeAsync().ConfigureAwait(false);
+            _audioEndPoint = eps;
+
+            // Wait for welcome, bounded retry
+            if (_welcomeMessagePcmu == null)
             {
-                _audioEndPoint?.Dispose();
-                Log.Information("Audio endpoint disposed.");
+                Log.Information("Waiting for welcome message...");
+                const int maxWait = 50;  // 5s
+                for (int waitCount = 0; waitCount < maxWait && _welcomeMessagePcmu == null; waitCount++)
+                {
+                    await Task.Delay(100).ConfigureAwait(false);
+                }
+                Log.Information(_welcomeMessagePcmu != null ? "Welcome ready" : "Welcome not ready; proceeding without");
             }
-        };
 
-        return sipTransport;
+            var answered = await sipClient.Answer(eps, eps).ConfigureAwait(false);
+            Log.Information(answered ? "Call answered successfully." : "Failed to answer call.");
+
+            _ = PlayWelcomeMessage();
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Failed to handle incoming call");
+        }
     }
+
+    private void OnCallEnded(SipClient _)
+    {
+        Log.Information("Call ended.");
+        try
+        {
+            _audioEndPoint?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Error disposing audio endpoint on call end");
+        }
+        finally
+        {
+            _audioEndPoint = null;
+        }
+    }
+
+    private void OnCallAnswered(SipClient _) => Log.Information("Call answered!");
 
     /// <summary>
     /// Stops client
@@ -267,12 +295,10 @@ public class StreamingVoiceSipBotClient
         {
             await _audioEndPoint.ShutdownAsync();
             _audioEndPoint.Dispose();
+            _audioEndPoint = null;
         }
+        _ttsProvider.Dispose();
         _streamingSttClient?.Dispose();
         Log.Information("Streaming voice SIP bot client stopped successfully.");
     }
-
-    // Event handlers
-    private async Task Sip_CallEnded(SipClient obj) => Log.Information("Call ended.");
-    private async Task Sip_CallAnswer(SipClient obj) => Log.Information("Call answered!");
 }

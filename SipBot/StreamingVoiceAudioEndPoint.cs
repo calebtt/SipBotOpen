@@ -56,8 +56,8 @@ public class StreamingVoiceAudioEndPoint : BaseAudioEndPoint, IDisposable
             // Delegate to core first
             await _voiceAgentCore.ShutdownAsync();
 
-            // Detach RTP audio pacer
-            _audioPacer.Detach(this).Wait();
+            // Detach RTP audio pacer (await — sync Wait can deadlock)
+            await _audioPacer.DetachAsync(this).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

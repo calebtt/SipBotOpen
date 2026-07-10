@@ -208,7 +208,7 @@ public class PersonalToolCallingTests : IDisposable
         private readonly List<CapturedToolCall> _captured;
 
         public TestSemanticToolFunctions(List<CapturedToolCall> captured)
-            : base(null, null)
+            : base(null, null, BotSettings.Settings.LanguageModel.Extensions)
         {
             _captured = captured;
         }

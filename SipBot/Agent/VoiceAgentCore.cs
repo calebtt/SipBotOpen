@@ -92,8 +92,8 @@ public class VoiceAgentCore
                     Log.Information("VAD: Volume filter cleared after speech segment.");
                 }
 
-                // Process through streaming STT for real-time detection
-                _streamingSttClient.ProcessAudioChunkAsync(segment.AsStream()).Wait();
+                // Process through streaming STT without blocking the VAD callback thread
+                _ = ProcessSegmentSttAsync(segment);
             };
 
             Log.Information("VoiceAgentCore initialized.");
@@ -115,8 +115,9 @@ public class VoiceAgentCore
             _vad?.Dispose();
             _vad = null;
 
+            // Stop generation only — TtsStreamer is owned by StreamingVoiceSipBotClient
+            // and shared across calls. Disposing it here broke every call after the first.
             _ttsStreamer.Stop();
-            _ttsStreamer.Dispose();
             _audioPacer.ResetBuffer();
             Log.Information("VoiceAgentCore shutdown complete.");
             return Task.CompletedTask;
@@ -153,6 +154,18 @@ public class VoiceAgentCore
         }
     }
 
+    private async Task ProcessSegmentSttAsync(SpeechSegment segment)
+    {
+        try
+        {
+            await _streamingSttClient.ProcessAudioChunkAsync(segment.AsStream()).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "VoiceAgentCore: STT processing failed for speech segment");
+        }
+    }
+
     /// <summary>
     /// Called when complete transcription is ready.
     /// </summary>
@@ -160,7 +173,6 @@ public class VoiceAgentCore
     {
         Log.Information($"VoiceAgentCore: STT Complete transcription: '{transcription}'");
 
-        bool shouldProcess;
         lock (_processingLock)
         {
             if (_isProcessingTranscription)
@@ -168,15 +180,16 @@ public class VoiceAgentCore
                 return;
             }
             _isProcessingTranscription = true;
-            shouldProcess = true;
         }
 
-        if (!shouldProcess)
-            return;
+        _ = ProcessTranscriptionGuardedAsync(transcription);
+    }
 
+    private async Task ProcessTranscriptionGuardedAsync(string transcription)
+    {
         try
         {
-            ProcessCompleteTranscriptionAsync(transcription).Wait();
+            await ProcessCompleteTranscriptionAsync(transcription).ConfigureAwait(false);
         }
         finally
         {
