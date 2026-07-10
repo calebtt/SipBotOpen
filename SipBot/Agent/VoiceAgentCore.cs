@@ -11,6 +11,7 @@ public class VoiceAgentCore
     private readonly LlmChat _llmChat;
     private readonly TtsStreamer _ttsStreamer;
     private readonly RtpAudioPacer _audioPacer;
+    private readonly Action? _onUserEngaged;
 
     private CancellationTokenSource? _cancellationTokenSource = null;
     private IVadSpeechSegmenter? _vad = null;
@@ -30,12 +31,14 @@ public class VoiceAgentCore
         SttProviderStreaming streamingSttClient,
         LlmChat llmChat,
         TtsStreamer ttsStreamer,
-        RtpAudioPacer audioPacer)
+        RtpAudioPacer audioPacer,
+        Action? onUserEngaged = null)
     {
         _streamingSttClient = streamingSttClient ?? throw new ArgumentNullException(nameof(streamingSttClient));
         _llmChat = llmChat ?? throw new ArgumentNullException(nameof(llmChat));
         _ttsStreamer = ttsStreamer ?? throw new ArgumentNullException(nameof(ttsStreamer));
         _audioPacer = audioPacer ?? throw new ArgumentNullException(nameof(audioPacer));
+        _onUserEngaged = onUserEngaged;
 
         _ttsStreamer.OnEchoRegistrationRequired += RegisterTtsAudioForEchoCancellation;
         _ttsStreamer.OnAudioChunkReady += (sender, chunk) => OnAudioReplyReady?.Invoke(chunk!);
@@ -81,6 +84,8 @@ public class VoiceAgentCore
             _vad.SpeechStarted += (sender, e) =>
             {
                 Log.Information("VAD: Speech segment started.");
+                // Caller still talking — do not complete a delayed hangup from end_conversation
+                _onUserEngaged?.Invoke();
 
                 if (_audioPacer.IsAudioPlaying && !_volumeFilterActive)
                 {
@@ -190,6 +195,7 @@ public class VoiceAgentCore
             return;
 
         Log.Information("VoiceAgentCore: STT Complete transcription: '{Transcription}'", transcription);
+        _onUserEngaged?.Invoke();
 
         lock (_processingLock)
         {

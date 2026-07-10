@@ -22,10 +22,11 @@ public class StreamingVoiceAudioEndPoint : BaseAudioEndPoint, IDisposable
     public StreamingVoiceAudioEndPoint(
         SttProviderStreaming streamingSttClient,
         LlmChat llmClient,
-        TtsStreamer ttsStreamer)
+        TtsStreamer ttsStreamer,
+        Action? onUserEngaged = null)
     {
-        // Compose core with pacer
-        _voiceAgentCore = new VoiceAgentCore(streamingSttClient, llmClient, ttsStreamer, _audioPacer);
+        // Compose core with pacer; onUserEngaged cancels delayed hangup if caller keeps talking
+        _voiceAgentCore = new VoiceAgentCore(streamingSttClient, llmClient, ttsStreamer, _audioPacer, onUserEngaged);
 
         // Forward events from core
         _voiceAgentCore.OnAudioReplyReady += chunk => OnAudioReplyReady?.Invoke(chunk);

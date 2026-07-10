@@ -58,8 +58,15 @@ public class StreamingVoiceSipBotClient
         //}
 
         string sipServer = sipConfig.Server;
+        // Hang up the active call only — never StopAsync() here. StopAsync disposes STT/TTS
+        // and tears down registration, so the first end_conversation would kill the whole bot.
         _toolFunctions = new(
-            async () => { Sip.Hangup(); await StopAsync(); },
+            () =>
+            {
+                Log.Information("Hangup action: ending active call only (bot keeps listening).");
+                Sip.Hangup();
+                return Task.CompletedTask;
+            },
             async (target) =>
             {
                 string uri = NormalizeTransferTarget(target, sipServer);
@@ -277,7 +284,11 @@ public class StreamingVoiceSipBotClient
                 _audioEndPoint = null;
             }
 
-            var eps = new StreamingVoiceAudioEndPoint(_streamingSttClient, _llmClient, _ttsProvider);
+            var eps = new StreamingVoiceAudioEndPoint(
+                _streamingSttClient,
+                _llmClient,
+                _ttsProvider,
+                onUserEngaged: _toolFunctions.CancelPendingHangup);
             await eps.InitializeAsync().ConfigureAwait(false);
             _audioEndPoint = eps;
 
