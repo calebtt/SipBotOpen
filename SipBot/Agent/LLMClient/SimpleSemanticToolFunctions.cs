@@ -29,6 +29,7 @@ public class SimpleSemanticToolFunctions
     private readonly Func<Task>? _hangupAction;
     private readonly Func<string, Task<bool>>? _transferCallAction;
     private readonly Dictionary<string, string> _extensionMap = new(StringComparer.OrdinalIgnoreCase);
+    private CancellationTokenSource? _pendingHangupCts;
     //private readonly BulkVsSmsService? _smsService;
 
     /// <summary>
@@ -36,12 +37,23 @@ public class SimpleSemanticToolFunctions
     /// </summary>
     public SimpleSemanticToolFunctions(
         Func<Task>? hangupAction = null,
-        Func<string, Task<bool>>? transferCallAction = null)
+        Func<string, Task<bool>>? transferCallAction = null,
+        IEnumerable<ExtensionSchema>? extensions = null)
         //BulkVsSmsService? smsService = null)
     {
         _hangupAction = hangupAction ?? (() => Task.CompletedTask);
         _transferCallAction = transferCallAction ?? ((string extension) => Task.FromResult(false));
         //_smsService = smsService;
+
+        if (extensions != null)
+        {
+            foreach (var ext in extensions)
+            {
+                if (string.IsNullOrWhiteSpace(ext.Name) || string.IsNullOrWhiteSpace(ext.Number))
+                    continue;
+                _extensionMap[ext.Name] = ext.Number;
+            }
+        }
     }
 
     [KernelFunction("send_notification")]
@@ -97,8 +109,16 @@ public class SimpleSemanticToolFunctions
                 Log.Information("Resolved extension name '{Original}' to full number '{Resolved}'", extension, actualExtension);
             }
 
-            // Fire-and-forget transfer (non-awaited per original design); action now takes full extension
-            _ = _transferCallAction!(actualExtension);
+            // Await so the LLM/tool result reflects real success/failure (was fire-and-forget).
+            bool ok = await _transferCallAction!(actualExtension).ConfigureAwait(false);
+            if (!ok)
+            {
+                return JsonSerializer.Serialize(new
+                {
+                    error = "Transfer failed",
+                    details = $"Could not transfer to {actualExtension}."
+                }, _jsonOptions);
+            }
 
             return JsonSerializer.Serialize(new { status = "success", message = $"Transferring to extension {actualExtension}." }, _jsonOptions);
         }
@@ -109,33 +129,72 @@ public class SimpleSemanticToolFunctions
         }
     }
 
+    /// <summary>
+    /// Cancels a delayed hangup from end_conversation (e.g. caller keeps talking).
+    /// </summary>
+    public void CancelPendingHangup()
+    {
+        var cts = Interlocked.Exchange(ref _pendingHangupCts, null);
+        if (cts == null)
+            return;
+        try
+        {
+            cts.Cancel();
+            Log.Information("Cancelled pending delayed hangup — caller still engaged.");
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+        finally
+        {
+            cts.Dispose();
+        }
+    }
+
     [KernelFunction("end_conversation")]
-    [Description("Gracefully end the call after message or resolution.")]
+    [Description("Hang up ONLY when the caller explicitly ends the call (goodbye, hang up, that's all) or is abusive. Do NOT use for declining a message, saying no, or changing topic — stay on the line and listen.")]
     public virtual async Task<string> EndConversationAsync(
-        [Description("Reason (e.g., 'message taken', 'resolved')")] string? reason = "")
+        [Description("Reason (e.g., 'user said goodbye', 'user requested hang up')")] string? reason = "")
     {
         try
         {
             Log.Warning("EndConversation: Reason={Reason}", reason);
 
-            // Immediate TTS response
-            var ttsMessage = $"Call ended ({reason}). Goodbye!";
-            var toolResult = JsonSerializer.Serialize(new { status = "success", message = ttsMessage }, _jsonOptions);
+            // Let the model/TTS say a natural goodbye; do not force "Call ended (...)" into the pipeline.
+            var toolResult = JsonSerializer.Serialize(new
+            {
+                status = "success",
+                message = "Call will end shortly. Say a brief goodbye if you have not already."
+            }, _jsonOptions);
 
-            // Delayed hangup (fire-and-forget, background task)
+            // Replace any prior delayed hangup; cancelable if the caller keeps speaking.
+            CancelPendingHangup();
+            var hangupCts = new CancellationTokenSource();
+            _pendingHangupCts = hangupCts;
+            var token = hangupCts.Token;
+
             _ = Task.Run(async () =>
             {
                 try
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(HangupDelaySeconds));
-                    await _hangupAction!();
+                    await Task.Delay(TimeSpan.FromSeconds(HangupDelaySeconds), token).ConfigureAwait(false);
+                    await _hangupAction!().ConfigureAwait(false);
                     Log.Information("Delayed hangup executed: {Reason}", reason);
+                }
+                catch (OperationCanceledException)
+                {
+                    Log.Information("Delayed hangup cancelled before execute: {Reason}", reason);
                 }
                 catch (Exception ex)
                 {
                     Log.Error(ex, "Delayed hangup failed: {Reason}", reason);
                 }
-            });
+                finally
+                {
+                    Interlocked.CompareExchange(ref _pendingHangupCts, null, hangupCts);
+                    hangupCts.Dispose();
+                }
+            }, CancellationToken.None);
 
             await Task.CompletedTask;
             return toolResult;

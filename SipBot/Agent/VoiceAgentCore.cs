@@ -11,6 +11,7 @@ public class VoiceAgentCore
     private readonly LlmChat _llmChat;
     private readonly TtsStreamer _ttsStreamer;
     private readonly RtpAudioPacer _audioPacer;
+    private readonly Action? _onUserEngaged;
 
     private CancellationTokenSource? _cancellationTokenSource = null;
     private IVadSpeechSegmenter? _vad = null;
@@ -18,6 +19,9 @@ public class VoiceAgentCore
     // Streaming STT and interruption handling
     private readonly object _processingLock = new();
     private bool _isProcessingTranscription = false;
+    /// <summary>Latest user utterance while LLM/TTS is busy — keeps the newest, drops older.</summary>
+    private string? _pendingTranscription;
+    private bool _volumeFilterActive;
 
     private bool disposedValue;
 
@@ -27,12 +31,14 @@ public class VoiceAgentCore
         SttProviderStreaming streamingSttClient,
         LlmChat llmChat,
         TtsStreamer ttsStreamer,
-        RtpAudioPacer audioPacer)
+        RtpAudioPacer audioPacer,
+        Action? onUserEngaged = null)
     {
         _streamingSttClient = streamingSttClient ?? throw new ArgumentNullException(nameof(streamingSttClient));
         _llmChat = llmChat ?? throw new ArgumentNullException(nameof(llmChat));
         _ttsStreamer = ttsStreamer ?? throw new ArgumentNullException(nameof(ttsStreamer));
         _audioPacer = audioPacer ?? throw new ArgumentNullException(nameof(audioPacer));
+        _onUserEngaged = onUserEngaged;
 
         _ttsStreamer.OnEchoRegistrationRequired += RegisterTtsAudioForEchoCancellation;
         _ttsStreamer.OnAudioChunkReady += (sender, chunk) => OnAudioReplyReady?.Invoke(chunk!);
@@ -59,21 +65,34 @@ public class VoiceAgentCore
             // The library's own default (32ms, the Silero model's native inference window) is
             // unrelated to and independent of this -- PushFrame's internal windowing handles that
             // regardless of the caller's chunk size.
-            _vad = new VadSpeechSegmenter(new VadOptions { MsPerFrame = 20 });
-
-            bool volumeFilterActive = false; // Local; use volatile if multi-threaded contention
+            //
+            // Telephony defaults: library BeginOfUtteranceMs=500 requires ~half a second of
+            // *consecutive* speech frames before an utterance even starts. Single-word answers
+            // ("yes"/"no"/"ok"/"what") are often 150-350ms of energy and never fire SpeechStarted.
+            // Lower begin threshold; keep pre-speech padding so the word onset is still in the
+            // segment; slightly snappier end silence for turn-taking.
+            _vad = new VadSpeechSegmenter(new VadOptions
+            {
+                MsPerFrame = 20,
+                BeginOfUtteranceMs = 160, // ~8 × 20ms frames
+                EndOfUtteranceMs = 400,
+                PreSpeechMs = 800,
+                Threshold = 0.25f,
+            });
 
             // VAD speech started: lower TTS volume during user speech
             _vad.SpeechStarted += (sender, e) =>
             {
                 Log.Information("VAD: Speech segment started.");
+                // Caller still talking — do not complete a delayed hangup from end_conversation
+                _onUserEngaged?.Invoke();
 
-                if (_audioPacer.IsAudioPlaying && !volumeFilterActive)
+                if (_audioPacer.IsAudioPlaying && !_volumeFilterActive)
                 {
                     Log.Information("VAD: Applying volume filter during potential interrupt activation.");
 
                     _audioPacer.ApplyFilter(chunk => AudioAlgos.AdjustPcmuVolume(chunk, VolumeLoweringFactor));
-                    volumeFilterActive = true;
+                    _volumeFilterActive = true;
                 }
             };
 
@@ -85,15 +104,15 @@ public class VoiceAgentCore
                 Log.Information("VAD: Speech segment completed, {Bytes} bytes, {Duration:F2}s, peak probability {Probability:F2}",
                     segment.Pcm.Length, segment.Duration.TotalSeconds, segment.Probability);
 
-                if (volumeFilterActive)
+                if (_volumeFilterActive)
                 {
                     _audioPacer.ClearFilter();
-                    volumeFilterActive = false;
+                    _volumeFilterActive = false;
                     Log.Information("VAD: Volume filter cleared after speech segment.");
                 }
 
-                // Process through streaming STT for real-time detection
-                _streamingSttClient.ProcessAudioChunkAsync(segment.AsStream()).Wait();
+                // Process through streaming STT without blocking the VAD callback thread
+                _ = ProcessSegmentSttAsync(segment);
             };
 
             Log.Information("VoiceAgentCore initialized.");
@@ -115,8 +134,9 @@ public class VoiceAgentCore
             _vad?.Dispose();
             _vad = null;
 
+            // Stop generation only — TtsStreamer is owned by StreamingVoiceSipBotClient
+            // and shared across calls. Disposing it here broke every call after the first.
             _ttsStreamer.Stop();
-            _ttsStreamer.Dispose();
             _audioPacer.ResetBuffer();
             Log.Information("VoiceAgentCore shutdown complete.");
             return Task.CompletedTask;
@@ -153,37 +173,73 @@ public class VoiceAgentCore
         }
     }
 
+    private async Task ProcessSegmentSttAsync(SpeechSegment segment)
+    {
+        try
+        {
+            await _streamingSttClient.ProcessAudioChunkAsync(segment.AsStream()).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "VoiceAgentCore: STT processing failed for speech segment");
+        }
+    }
+
     /// <summary>
     /// Called when complete transcription is ready.
+    /// If LLM/TTS is already busy, keep the *latest* utterance (barge-in / "I said no") instead of dropping.
     /// </summary>
     private void OnTranscriptionComplete(object? sender, string transcription)
     {
-        Log.Information($"VoiceAgentCore: STT Complete transcription: '{transcription}'");
+        if (string.IsNullOrWhiteSpace(transcription))
+            return;
 
-        bool shouldProcess;
+        Log.Information("VoiceAgentCore: STT Complete transcription: '{Transcription}'", transcription);
+        _onUserEngaged?.Invoke();
+
         lock (_processingLock)
         {
             if (_isProcessingTranscription)
             {
+                _pendingTranscription = transcription.Trim();
+                Log.Information("VoiceAgentCore: Queued latest user utterance while previous turn is in flight.");
                 return;
             }
             _isProcessingTranscription = true;
-            shouldProcess = true;
         }
 
-        if (!shouldProcess)
-            return;
+        _ = ProcessTranscriptionGuardedAsync(transcription.Trim());
+    }
 
+    private async Task ProcessTranscriptionGuardedAsync(string transcription)
+    {
+        string? current = transcription;
         try
         {
-            ProcessCompleteTranscriptionAsync(transcription).Wait();
+            while (current != null)
+            {
+                await ProcessCompleteTranscriptionAsync(current).ConfigureAwait(false);
+
+                lock (_processingLock)
+                {
+                    current = _pendingTranscription;
+                    _pendingTranscription = null;
+                    if (current == null)
+                        _isProcessingTranscription = false;
+                }
+
+                if (current != null)
+                    Log.Information("VoiceAgentCore: Processing queued utterance: '{Transcription}'", current);
+            }
         }
-        finally
+        catch
         {
             lock (_processingLock)
             {
                 _isProcessingTranscription = false;
+                _pendingTranscription = null;
             }
+            throw;
         }
     }
 
@@ -194,24 +250,29 @@ public class VoiceAgentCore
     {
         try
         {
-            Log.Information($"VoiceAgentCore: Processing complete transcription: {transcription}");
+            Log.Information("VoiceAgentCore: Processing complete transcription: {Transcription}", transcription);
 
-            // Updated: Use LlmChat.ProcessMessageAsync (no maxTokens; CT propagated)
             string response = await _llmChat.ProcessMessageAsync(transcription, _cancellationTokenSource?.Token ?? CancellationToken.None);
-            Log.Information($"VoiceAgentCore: LLM Response: {response}");
+            Log.Information("VoiceAgentCore: LLM Response: {Response}", response);
 
             if (_cancellationTokenSource?.IsCancellationRequested == true)
                 return;
 
-            // Interrupt if playing
-            InterruptPlayback();
+            if (string.IsNullOrWhiteSpace(response))
+            {
+                Log.Warning("VoiceAgentCore: Empty LLM response; skipping TTS.");
+                return;
+            }
 
-            // Start streaming TTS (voiceKey null by default)
+            // Interrupt any prior playback before speaking the new reply
+            InterruptPlayback();
+            _ttsStreamer.Stop();
+
             await _ttsStreamer.StartStreamingAsync(response, ct: _cancellationTokenSource?.Token ?? CancellationToken.None);
         }
         catch (TaskCanceledException tcex)
         {
-            Log.Debug($"VoiceAgentCore: Task canceled, info: {tcex.Message}");
+            Log.Debug("VoiceAgentCore: Task canceled, info: {Message}", tcex.Message);
         }
         catch (Exception ex)
         {

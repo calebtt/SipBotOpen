@@ -22,10 +22,11 @@ public class StreamingVoiceAudioEndPoint : BaseAudioEndPoint, IDisposable
     public StreamingVoiceAudioEndPoint(
         SttProviderStreaming streamingSttClient,
         LlmChat llmClient,
-        TtsStreamer ttsStreamer)
+        TtsStreamer ttsStreamer,
+        Action? onUserEngaged = null)
     {
-        // Compose core with pacer
-        _voiceAgentCore = new VoiceAgentCore(streamingSttClient, llmClient, ttsStreamer, _audioPacer);
+        // Compose core with pacer; onUserEngaged cancels delayed hangup if caller keeps talking
+        _voiceAgentCore = new VoiceAgentCore(streamingSttClient, llmClient, ttsStreamer, _audioPacer, onUserEngaged);
 
         // Forward events from core
         _voiceAgentCore.OnAudioReplyReady += chunk => OnAudioReplyReady?.Invoke(chunk);
@@ -56,8 +57,8 @@ public class StreamingVoiceAudioEndPoint : BaseAudioEndPoint, IDisposable
             // Delegate to core first
             await _voiceAgentCore.ShutdownAsync();
 
-            // Detach RTP audio pacer
-            _audioPacer.Detach(this).Wait();
+            // Detach RTP audio pacer (await — sync Wait can deadlock)
+            await _audioPacer.DetachAsync(this).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

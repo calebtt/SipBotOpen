@@ -38,9 +38,44 @@ public class Program
         var sipBotClient = new StreamingVoiceSipBotClient(selectedConfig);
 
         Log.Information("Listening for incoming calls with streaming STT, streaming TTS, and real-time interruption detection...");
-        Log.Information("Press any key to exit...");
 
-        Console.ReadKey();
+        // Headless-friendly wait: Ctrl+C / SIGTERM, or a keypress when a real console is attached.
+        using var exitCts = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, e) =>
+        {
+            e.Cancel = true;
+            exitCts.Cancel();
+        };
+        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+        {
+            try { exitCts.Cancel(); } catch { /* ignore */ }
+        };
+
+        if (!Console.IsInputRedirected && Environment.UserInteractive)
+        {
+            Log.Information("Press any key to exit (or Ctrl+C)...");
+            try
+            {
+                while (!exitCts.IsCancellationRequested && !Console.KeyAvailable)
+                    await Task.Delay(200, exitCts.Token).ConfigureAwait(false);
+                if (!exitCts.IsCancellationRequested && Console.KeyAvailable)
+                    Console.ReadKey(intercept: true);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+        else
+        {
+            Log.Information("Running headless — send SIGINT/SIGTERM (Ctrl+C) to exit...");
+            try
+            {
+                await Task.Delay(Timeout.Infinite, exitCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
 
         await sipBotClient.StopAsync();
         sipBotClient.Sip.Shutdown();
@@ -95,7 +130,7 @@ public class Program
         // Parse profile from args/env (modern: Use args parser or IOptions)
         string? profile = args.FirstOrDefault(a => a.StartsWith("--profile="))?.Split('=')[1]
             ?? Environment.GetEnvironmentVariable("BOT_PROFILE")
-            ?? "vendpartners"; // Sensible default
+            ?? "personal"; // Matches profiles/personal.json shipped with the repo
 
         // Load once, async (no legacy string param)
         await BotSettings.LoadSettingsFromJsonAsync(profileName: profile, profilesDirectory: "profiles");
