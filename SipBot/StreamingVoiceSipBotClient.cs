@@ -57,9 +57,15 @@ public class StreamingVoiceSipBotClient
         //    Log.Information("BulkVS SMS enabled for extension {Username}", selectedConfig.Username);
         //}
 
+        string sipServer = sipConfig.Server;
         _toolFunctions = new(
             async () => { Sip.Hangup(); await StopAsync(); },
-            async (x) => { return await Sip.BlindTransferAsync(x, TimeSpan.FromSeconds(5)); },
+            async (target) =>
+            {
+                string uri = NormalizeTransferTarget(target, sipServer);
+                Log.Information("Blind transfer requested: raw='{Raw}' uri='{Uri}'", target, uri);
+                return await Sip.BlindTransferAsync(uri, TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+            },
             BotSettings.Settings.LanguageModel.Extensions
         );
         _llmClient = new LlmChat(BotSettings.Settings.LanguageModel, _toolFunctions, Algos.BuildKernel(BotSettings.Settings.LanguageModel));
@@ -189,6 +195,25 @@ public class StreamingVoiceSipBotClient
         {
             streamingSttClient.TranscriptionComplete -= OnTranscriptionComplete;  // Ensure cleanup
         }
+    }
+
+    /// <summary>
+    /// Accepts "personal" map results like "102@host", bare "102", or full "sip:102@host".
+    /// BlindTransferAsync requires a parseable SIP URI.
+    /// </summary>
+    public static string NormalizeTransferTarget(string target, string defaultServer)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(target);
+        string t = target.Trim();
+        if (t.StartsWith("sip:", StringComparison.OrdinalIgnoreCase))
+            return t;
+        if (t.Contains('@', StringComparison.Ordinal))
+            return "sip:" + t;
+        string host = string.IsNullOrWhiteSpace(defaultServer) ? "localhost" : defaultServer.Trim();
+        // Strip accidental sip: on server if present
+        if (host.StartsWith("sip:", StringComparison.OrdinalIgnoreCase))
+            host = host[4..];
+        return $"sip:{t}@{host}";
     }
 
     private (SipClient, SIPTransport) BuildSipClient(SipConfig sipSettings)

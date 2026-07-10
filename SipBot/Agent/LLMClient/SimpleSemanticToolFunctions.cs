@@ -108,8 +108,16 @@ public class SimpleSemanticToolFunctions
                 Log.Information("Resolved extension name '{Original}' to full number '{Resolved}'", extension, actualExtension);
             }
 
-            // Fire-and-forget transfer (non-awaited per original design); action now takes full extension
-            _ = _transferCallAction!(actualExtension);
+            // Await so the LLM/tool result reflects real success/failure (was fire-and-forget).
+            bool ok = await _transferCallAction!(actualExtension).ConfigureAwait(false);
+            if (!ok)
+            {
+                return JsonSerializer.Serialize(new
+                {
+                    error = "Transfer failed",
+                    details = $"Could not transfer to {actualExtension}."
+                }, _jsonOptions);
+            }
 
             return JsonSerializer.Serialize(new { status = "success", message = $"Transferring to extension {actualExtension}." }, _jsonOptions);
         }
