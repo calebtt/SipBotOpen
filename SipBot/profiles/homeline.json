@@ -1,0 +1,128 @@
+{
+  "ProfileExtensionKey": {
+    "SipAccountIndex": 0,
+    "HomelineBaseUrl": "http://127.0.0.1:8010",
+    "HomelineServiceToken": "dev-service-token-change-me"
+  },
+  "LanguageModel": {
+    "ListenSipAccountIndex": 0,
+    "ApiKey": "YOUR_API_KEY_HERE",
+    "Model": "grok-4-fast-non-reasoning",
+    "EndPoint": "https://api.x.ai/v1",
+    "MaxTokens": 400,
+    "WelcomeMessage": "You've reached HomeLine. This call is recorded and is not a private attorney line. What is your PIN?",
+    "WelcomeFilePath": "recordings/welcome_message.wav",
+    "InstructionsText": "You are HomeLine, a modern AI phone assistant for people in custody. Speak plainly; 1–2 short sentences per turn; guide by conversation (no press-1 menus). NOT confidential / not a private lawyer line; no legal advice; never ask for money or gift cards. PRIMARY delivery is EMAIL (no SMS campaigns). Flow: (1) authenticate_pin, (2) greet using tool context (contacts with email, credits, invite code), (3) for messages prefer create_message (auto→email) or create_email_message; only use SMS if they insist or contact has phone only, (4) confirm, (5) goodbye only on explicit end. Empty book: coach family join URL + invite code and ask family for EMAIL. Gather spoken emails carefully: validate_email_address, read back, then send. Live calls: connect_contact then transfer_conversation with dial_target only. Never invent emails or phone numbers.",
+    "InstructionsAddendum": "\n\nAttorney path: not confidential; logistics only. DTMF for PIN/digits. Jail minutes are expensive — be efficient. Email first always when the contact has an address on file.",
+    "ToolGuidance": "\n\nTools: authenticate_pin first. create_message (channel=auto, email preferred) for 'tell Maria…'. create_email_message for explicit email / new addresses after validate_email_address. create_sms_message only if email unavailable. get_inbox for status. connect_contact then transfer_conversation(dial_target). send_checkin (email preferred). end_conversation only on explicit goodbye.",
+    "Temperature": 0.2,
+    "Extensions": [],
+    "tools": [
+      {
+        "name": "authenticate_pin",
+        "description": "Authenticate with HomeLine PIN and load session context.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "pin": { "type": "string", "description": "Caller PIN", "required": true },
+            "ani": { "type": "string", "description": "Caller ID if known", "required": false, "default": "" }
+          }
+        }
+      },
+      {
+        "name": "create_message",
+        "description": "Send message to contact; auto prefers email.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "body_text": { "type": "string", "description": "Message body", "required": true },
+            "contact_id": { "type": "string", "description": "Phone book contact id", "required": false, "default": "" },
+            "channel": { "type": "string", "description": "auto|email|sms", "required": false, "default": "auto" },
+            "is_setup_message": { "type": "boolean", "description": "Include join link", "required": false, "default": false }
+          }
+        }
+      },
+      {
+        "name": "validate_email_address",
+        "description": "Validate spoken email before sending.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "candidate": { "type": "string", "description": "Spoken email", "required": true }
+          }
+        }
+      },
+      {
+        "name": "create_email_message",
+        "description": "Primary: send email message.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "body_text": { "type": "string", "description": "Message body", "required": true },
+            "dest_email": { "type": "string", "description": "Validated email or empty if contact has email", "required": false, "default": "" },
+            "contact_id": { "type": "string", "description": "Optional contact id", "required": false, "default": "" }
+          }
+        }
+      },
+      {
+        "name": "create_sms_message",
+        "description": "SMS only when email unavailable (often log-only).",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "body_text": { "type": "string", "description": "Message body", "required": true },
+            "contact_id": { "type": "string", "description": "Contact id", "required": false, "default": "" },
+            "dest_e164": { "type": "string", "description": "Phone if no contact", "required": false, "default": "" },
+            "is_setup_message": { "type": "boolean", "description": "Setup flag", "required": false, "default": false }
+          }
+        }
+      },
+      {
+        "name": "get_inbox",
+        "description": "List messages and replies.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "mark_read": { "type": "boolean", "description": "Mark inbound read", "required": false, "default": true }
+          }
+        }
+      },
+      {
+        "name": "connect_contact",
+        "description": "Authorize live connect; then transfer to dial_target.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "contact_id": { "type": "string", "description": "Contact id", "required": true }
+          }
+        }
+      },
+      {
+        "name": "transfer_conversation",
+        "description": "Blind transfer to dial_target from connect_contact only.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "extension": { "type": "string", "description": "dial_target from connect_contact", "required": true },
+            "reason": { "type": "string", "description": "Reason", "required": false, "default": "" }
+          }
+        }
+      },
+      {
+        "name": "send_checkin",
+        "description": "I'm OK blast (email preferred).",
+        "parameters": { "type": "object", "properties": {} }
+      },
+      {
+        "name": "end_conversation",
+        "description": "Hang up only on explicit goodbye.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "reason": { "type": "string", "description": "Reason", "required": false, "default": "" }
+          }
+        }
+      }
+    ]
+  }
+}

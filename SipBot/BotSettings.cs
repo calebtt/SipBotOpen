@@ -138,6 +138,14 @@ public class ProfileExtension
 {
     [JsonPropertyName("SipAccountIndex")]
     public int SipAccountIndex { get; set; } = 0;
+
+    /// <summary>HomeLine Relay API base URL (e.g. http://127.0.0.1:8010). Empty = personal assistant tools only.</summary>
+    [JsonPropertyName("HomelineBaseUrl")]
+    public string HomelineBaseUrl { get; set; } = string.Empty;
+
+    /// <summary>Bearer token matching HOMELINE_SERVICE_TOKEN on the relay.</summary>
+    [JsonPropertyName("HomelineServiceToken")]
+    public string HomelineServiceToken { get; set; } = string.Empty;
 }
 
 public class BotSettingsConfig

@@ -33,6 +33,7 @@ public class StreamingVoiceSipBotClient
     private readonly SttProviderStreaming _streamingSttClient;
     private readonly TtsStreamer _ttsProvider = new();
     private readonly SimpleSemanticToolFunctions _toolFunctions;
+    private readonly HomeLineToolFunctions? _homeLineTools;
     private readonly LlmChat _llmClient;
 
     private string _welcomeMessageText = String.Empty;
@@ -60,21 +61,40 @@ public class StreamingVoiceSipBotClient
         string sipServer = sipConfig.Server;
         // Hang up the active call only — never StopAsync() here. StopAsync disposes STT/TTS
         // and tears down registration, so the first end_conversation would kill the whole bot.
-        _toolFunctions = new(
-            () =>
-            {
-                Log.Information("Hangup action: ending active call only (bot keeps listening).");
-                Sip.Hangup();
-                return Task.CompletedTask;
-            },
-            async (target) =>
-            {
-                string uri = NormalizeTransferTarget(target, sipServer);
-                Log.Information("Blind transfer requested: raw='{Raw}' uri='{Uri}'", target, uri);
-                return await Sip.BlindTransferAsync(uri, TimeSpan.FromSeconds(10)).ConfigureAwait(false);
-            },
-            BotSettings.Settings.LanguageModel.Extensions
-        );
+        Func<Task> hangup = () =>
+        {
+            Log.Information("Hangup action: ending active call only (bot keeps listening).");
+            Sip.Hangup();
+            return Task.CompletedTask;
+        };
+        Func<string, Task<bool>> transfer = async (target) =>
+        {
+            string uri = NormalizeTransferTarget(target, sipServer);
+            Log.Information("Blind transfer requested: raw='{Raw}' uri='{Uri}'", target, uri);
+            return await Sip.BlindTransferAsync(uri, TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+        };
+
+        var ext = BotSettings.Settings.ProfileExtension;
+        if (!string.IsNullOrWhiteSpace(ext.HomelineBaseUrl))
+        {
+            var token = string.IsNullOrWhiteSpace(ext.HomelineServiceToken)
+                ? Environment.GetEnvironmentVariable("HOMELINE_SERVICE_TOKEN") ?? ""
+                : ext.HomelineServiceToken;
+            var relay = new HomeLineRelayClient(ext.HomelineBaseUrl, token);
+            var homeLineTools = new HomeLineToolFunctions(relay, hangup, transfer);
+            _toolFunctions = homeLineTools;
+            _homeLineTools = homeLineTools;
+            Log.Information("HomeLine relay tools enabled → {BaseUrl}", ext.HomelineBaseUrl);
+        }
+        else
+        {
+            _homeLineTools = null;
+            _toolFunctions = new SimpleSemanticToolFunctions(
+                hangup,
+                transfer,
+                BotSettings.Settings.LanguageModel.Extensions);
+        }
+
         _llmClient = new LlmChat(BotSettings.Settings.LanguageModel, _toolFunctions, Algos.BuildKernel(BotSettings.Settings.LanguageModel));
 
         // Construct pipeline
@@ -318,6 +338,7 @@ public class StreamingVoiceSipBotClient
     private void OnCallEnded(SipClient _)
     {
         Log.Information("Call ended.");
+        _homeLineTools?.ResetSession();
         try
         {
             _audioEndPoint?.Dispose();
