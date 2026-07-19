@@ -33,9 +33,18 @@ public sealed class HomeLineRelayClient : IDisposable
         _http.Timeout = TimeSpan.FromSeconds(30);
     }
 
-    public async Task<JsonElement?> AuthAsync(string pin, string? ani, CancellationToken ct = default)
+    public async Task<JsonElement?> AuthAsync(
+        string pin,
+        string? ani,
+        string? spokenName = null,
+        CancellationToken ct = default)
     {
-        var payload = JsonSerializer.Serialize(new { pin, ani }, JsonOpts);
+        var payload = JsonSerializer.Serialize(new
+        {
+            pin,
+            ani,
+            spoken_name = spokenName,
+        }, JsonOpts);
         return await PostJsonAsync("v1/session/auth", payload, ct).ConfigureAwait(false);
     }
 
@@ -47,6 +56,7 @@ public sealed class HomeLineRelayClient : IDisposable
         string? destE164 = null,
         string? destEmail = null,
         bool isSetupMessage = false,
+        string? audioPath = null,
         CancellationToken ct = default)
     {
         // channel: auto (prefer email) | email | sms
@@ -59,6 +69,7 @@ public sealed class HomeLineRelayClient : IDisposable
             dest_e164 = destE164,
             dest_email = destEmail,
             is_setup_message = isSetupMessage,
+            audio_path = audioPath,
         }, JsonOpts);
         return await PostJsonAsync("v1/messages", payload, ct).ConfigureAwait(false);
     }

@@ -20,13 +20,13 @@
     "tools": [
       {
         "name": "authenticate_pin",
-        "description": "Authenticate with 4-digit PIN (DTMF) plus spoken name matched to the account.",
+        "description": "Authenticate with 4-digit DTMF PIN plus spoken name. Call after both are collected.",
         "parameters": {
           "type": "object",
           "properties": {
             "pin": {
               "type": "string",
-              "description": "Caller PIN",
+              "description": "4-digit keypad PIN",
               "required": true
             },
             "ani": {
@@ -37,9 +37,8 @@
             },
             "spoken_name": {
               "type": "string",
-              "description": "Name they spoke after the PIN (first or full name on file)",
-              "required": true,
-              "default": ""
+              "description": "Name they spoke after the PIN",
+              "required": true
             }
           }
         }

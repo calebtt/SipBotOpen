@@ -33,26 +33,44 @@ public class HomeLineToolFunctions : SimpleSemanticToolFunctions
     }
 
     [KernelFunction("authenticate_pin")]
-    [Description("Authenticate the caller with their HomeLine PIN. Call this first before other HomeLine tools. Returns session context: contacts, credits, invite code, unread count.")]
+    [Description(
+        "Authenticate after the caller enters their 4-digit DTMF PIN and says their name. " +
+        "Call this first before other HomeLine tools. Pass pin from keypad and spoken_name from speech. " +
+        "Never ask them to speak the PIN aloud. Returns session context: contacts, credits, invite code, unread.")]
     public async Task<string> AuthenticatePinAsync(
-        [Description("4–8 digit PIN spoken or entered by the caller")] string pin,
+        [Description("Exactly 4-digit PIN from the keypad (DTMF)")] string pin,
+        [Description("Name they spoke after the PIN (first or full name on file)")] string spoken_name,
         [Description("Caller ANI if known, else empty")] string? ani = "")
     {
         try
         {
-            var result = await _relay.AuthAsync(pin.Trim(), string.IsNullOrWhiteSpace(ani) ? null : ani).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(spoken_name))
+                return JsonSerializer.Serialize(new
+                {
+                    error = "name_required",
+                    detail = "Ask them to say their name after the PIN, then call again with spoken_name.",
+                }, _json);
+
+            var result = await _relay.AuthAsync(
+                pin.Trim(),
+                string.IsNullOrWhiteSpace(ani) ? null : ani,
+                spoken_name.Trim()).ConfigureAwait(false);
             if (result is null)
                 return JsonSerializer.Serialize(new { error = "Authentication failed", detail = "Relay unreachable or invalid response" }, _json);
 
-            if (result.Value.TryGetProperty("detail", out var detail) && result.Value.TryGetProperty("status", out _))
+            if (result.Value.TryGetProperty("detail", out _) && !result.Value.TryGetProperty("session_token", out _))
                 return result.Value.GetRawText();
 
             if (!result.Value.TryGetProperty("session_token", out var tok))
-                return JsonSerializer.Serialize(new { error = "Invalid PIN" }, _json);
+                return JsonSerializer.Serialize(new
+                {
+                    error = "Could not verify PIN and name",
+                    detail = "Ask them to re-enter the 4-digit PIN on the keypad and say their name again.",
+                }, _json);
 
             _sessionToken = tok.GetString();
             _agentHints = result.Value.TryGetProperty("agent_greeting_hints", out var h) ? h.GetString() : null;
-            Log.Information("HomeLine session authenticated.");
+            Log.Information("HomeLine session authenticated (PIN + name).");
             return result.Value.GetRawText();
         }
         catch (Exception ex)
