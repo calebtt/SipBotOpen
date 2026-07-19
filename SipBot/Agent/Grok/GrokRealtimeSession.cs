@@ -268,20 +268,40 @@ public sealed class GrokRealtimeSession : IAsyncDisposable
         {
             case "session.created":
             case "session.updated":
-                Log.Debug("Grok event {Type}", type);
+                Log.Information("Grok event {Type}", type);
                 break;
 
             case "error":
-                Log.Warning("Grok error event: {Json}", json.Length > 500 ? json[..500] : json);
+                Log.Warning("Grok error event: {Json}", json.Length > 800 ? json[..800] : json);
                 break;
 
+            // xAI / OpenAI Realtime audio delta variants
             case "response.output_audio.delta":
             case "response.audio.delta":
+            case "response.output_audio_transcript.delta":
+                if (type.EndsWith("transcript.delta", StringComparison.Ordinal))
+                {
+                    if (root.TryGetProperty("delta", out var td) && td.GetString() is { Length: > 0 } transcript)
+                        Log.Debug("Grok transcript delta: {T}", transcript);
+                    break;
+                }
                 if (root.TryGetProperty("delta", out var delta) && delta.GetString() is { Length: > 0 } b64)
                 {
                     var pcm = Convert.FromBase64String(b64);
+                    Log.Debug("Grok audio delta: {Bytes} bytes pcm16", pcm.Length);
                     await _playPcm(pcm, GrokSampleRateHz).ConfigureAwait(false);
                 }
+                break;
+
+            case "response.created":
+            case "response.done":
+            case "response.output_item.added":
+            case "response.output_item.done":
+            case "response.content_part.added":
+            case "response.content_part.done":
+            case "response.output_audio.done":
+            case "response.audio.done":
+                Log.Information("Grok event {Type}", type);
                 break;
 
             case "response.function_call_arguments.done":
@@ -297,9 +317,13 @@ public sealed class GrokRealtimeSession : IAsyncDisposable
                 break;
 
             default:
-                // Keep noise down — many event types are informational
-                if (type.Contains("error", StringComparison.OrdinalIgnoreCase))
-                    Log.Warning("Grok event {Type}: {Snippet}", type, json.Length > 300 ? json[..300] : json);
+                // Log unknown types once at Info so we can map the real xAI event names
+                if (type.Contains("error", StringComparison.OrdinalIgnoreCase)
+                    || type.Contains("audio", StringComparison.OrdinalIgnoreCase)
+                    || type.Contains("response", StringComparison.OrdinalIgnoreCase))
+                    Log.Information("Grok event {Type}: {Snippet}", type, json.Length > 400 ? json[..400] : json);
+                else
+                    Log.Debug("Grok event {Type}", type);
                 break;
         }
     }

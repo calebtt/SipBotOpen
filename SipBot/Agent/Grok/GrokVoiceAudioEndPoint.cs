@@ -37,8 +37,16 @@ public sealed class GrokVoiceAudioEndPoint : BaseAudioEndPoint, IDisposable
             playPcm: PlayGrokPcmAsync);
 
         await _session.ConnectAsync().ConfigureAwait(false);
-        await _session.SpeakWelcomeAsync().ConfigureAwait(false);
-        Log.Information("GrokVoiceAudioEndPoint ready (Grok Realtime, no local STT/TTS)");
+        // Defer welcome until after SIP Answer so RTP is up when audio deltas arrive.
+        Log.Information("GrokVoiceAudioEndPoint WS ready (welcome deferred until media up)");
+    }
+
+    /// <summary>Call after SIP Answer so the welcome is heard on a live media path.</summary>
+    public Task SpeakWelcomeWhenReadyAsync()
+    {
+        if (_session == null)
+            return Task.CompletedTask;
+        return _session.SpeakWelcomeAsync();
     }
 
     public override async Task ShutdownAsync()

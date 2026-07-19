@@ -375,9 +375,16 @@ public class StreamingVoiceSipBotClient
             var answered = await sipClient.Answer(eps, eps).ConfigureAwait(false);
             Log.Information(answered ? "Call answered successfully." : "Failed to answer call.");
 
-            if (!_useGrokVoice)
+            if (_useGrokVoice && _grokEndPoint != null && answered)
+            {
+                // Media is up — ask Grok to speak the disclaimer + PIN prompt
+                await Task.Delay(150).ConfigureAwait(false);
+                await _grokEndPoint.SpeakWelcomeWhenReadyAsync().ConfigureAwait(false);
+            }
+            else if (!_useGrokVoice)
+            {
                 _ = PlayWelcomeMessage();
-            // Grok path: SpeakWelcomeAsync already fired inside GrokVoiceAudioEndPoint.InitializeAsync
+            }
         }
         catch (Exception ex)
         {
