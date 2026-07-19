@@ -6,10 +6,17 @@ namespace SipBot;
 
 public static partial class Algos
 {
-    public static SIPTransport CreateSipTransport(int port)
+    /// <param name="port">
+    /// Local UDP bind port. Use 0 for ephemeral. Do NOT pass the PBX server port (5060) when
+    /// co-located with Asterisk — that port is already taken.
+    /// </param>
+    public static SIPTransport CreateSipTransport(int port = 0)
     {
         StunHelper.SetupStun();
         var sipTransport = new SIPTransport();
+        // Prefer env SIP_LOCAL_PORT; default ephemeral so we can run beside Asterisk on the same host.
+        if (int.TryParse(Environment.GetEnvironmentVariable("SIP_LOCAL_PORT"), out var envPort) && envPort >= 0)
+            port = envPort;
         sipTransport.AddSIPChannel(new SIPUDPChannel(new IPEndPoint(IPAddress.Any, port)));
 
         foreach (var channel in sipTransport.GetSIPChannels())
@@ -30,16 +37,38 @@ public static partial class Algos
 /// </summary>
 public class StreamingVoiceSipBotClient
 {
-    private readonly SttProviderStreaming _streamingSttClient;
-    private readonly TtsStreamer _ttsProvider = new();
+    /// <summary>
+    /// HomeLine default: Grok Voice Realtime (cloud speech). Local Whisper/Kokoro only for personal profile
+    /// or when HOMELINE_SPEECH=local.
+    /// </summary>
+    public static bool UseGrokVoice
+    {
+        get
+        {
+            var mode = (Environment.GetEnvironmentVariable("HOMELINE_SPEECH")
+                ?? Environment.GetEnvironmentVariable("SIPBOT_SPEECH")
+                ?? "").Trim().ToLowerInvariant();
+            if (mode is "local" or "whisper" or "kokoro")
+                return false;
+            if (mode is "grok" or "realtime" or "voice")
+                return true;
+            // Default: Grok when HomeLine relay is configured
+            return !string.IsNullOrWhiteSpace(BotSettings.Settings.ProfileExtension.HomelineBaseUrl);
+        }
+    }
+
+    private readonly SttProviderStreaming? _streamingSttClient;
+    private readonly TtsStreamer? _ttsProvider;
     private readonly SimpleSemanticToolFunctions _toolFunctions;
     private readonly HomeLineToolFunctions? _homeLineTools;
-    private readonly LlmChat _llmClient;
+    private readonly LlmChat? _llmClient;
+    private readonly bool _useGrokVoice;
 
     private string _welcomeMessageText = String.Empty;
     private byte[]? _welcomeMessagePcmu;
 
-    private StreamingVoiceAudioEndPoint? _audioEndPoint = null;
+    private BaseAudioEndPoint? _audioEndPoint = null;
+    private GrokVoiceAudioEndPoint? _grokEndPoint = null;
 
     public string WelcomeMessagePath { get; } = BotSettings.Settings.LanguageModel.WelcomeFilePath;  // Immutable
 
@@ -48,15 +77,6 @@ public class StreamingVoiceSipBotClient
     public StreamingVoiceSipBotClient(SipConfig sipConfig)
     {
         ArgumentNullException.ThrowIfNull(sipConfig);
-
-        // TODO see SMS notes
-        // Per-extension SMS (create if BulkVs present; no env override)
-        //BulkVsSmsService? smsService = null;
-        //if (selectedConfig.BulkVs != null)
-        //{
-        //    smsService = new BulkVsSmsService(selectedConfig.BulkVs);
-        //    Log.Information("BulkVS SMS enabled for extension {Username}", selectedConfig.Username);
-        //}
 
         string sipServer = sipConfig.Server;
         // Hang up the active call only — never StopAsync() here. StopAsync disposes STT/TTS
@@ -95,30 +115,53 @@ public class StreamingVoiceSipBotClient
                 BotSettings.Settings.LanguageModel.Extensions);
         }
 
-        _llmClient = new LlmChat(BotSettings.Settings.LanguageModel, _toolFunctions, Algos.BuildKernel(BotSettings.Settings.LanguageModel));
-
-        // Construct pipeline
-        string whisperModelUrl = BotSettings.Settings.SpeechToText.SttModelUrl;
-        if (string.IsNullOrEmpty(whisperModelUrl))
+        _useGrokVoice = UseGrokVoice;
+        if (_useGrokVoice)
         {
-            Log.Error("No Whisper model URL configured.");
-            throw new InvalidOperationException("No Whisper model URL configured in settings.");
+            // Cloud speech path — no Whisper, no Kokoro, no local LLM chat loop
+            _streamingSttClient = null;
+            _ttsProvider = null;
+            _llmClient = null;
+            Log.Information("Speech path: Grok Voice Realtime (cloud). Local STT/TTS disabled.");
         }
+        else
+        {
+            _ttsProvider = new TtsStreamer();
+            _llmClient = new LlmChat(BotSettings.Settings.LanguageModel, _toolFunctions, Algos.BuildKernel(BotSettings.Settings.LanguageModel));
 
-        _streamingSttClient = new SttProviderStreaming(whisperModelUrl);
+            string whisperModelUrl = BotSettings.Settings.SpeechToText.SttModelUrl;
+            if (string.IsNullOrEmpty(whisperModelUrl))
+            {
+                Log.Error("No Whisper model URL configured.");
+                throw new InvalidOperationException("No Whisper model URL configured in settings.");
+            }
+
+            _streamingSttClient = new SttProviderStreaming(whisperModelUrl);
+            Log.Information("Speech path: local Whisper STT + Kokoro TTS + LLM tools.");
+        }
 
         (Sip, _) = BuildSipClient(sipConfig);  // Use selected config
 
         // Prefer SipClient events over blocking .Wait() on handlers (deadlock risk).
         Sip.CallEnded += OnCallEnded;
         Sip.CallAnswer += OnCallAnswered;
+        Sip.DtmfDigitReceived += OnDtmfDigit;
         // Fire-and-forget Task — avoids async void event handlers (VSTHRD100).
         Sip.IncomingCall += (client, invite) =>
         {
             _ = HandleIncomingCallAsync(client, invite);
         };
 
-        _ = InitializeWelcomeMessageAsync();
+        if (!_useGrokVoice)
+            _ = InitializeWelcomeMessageAsync();
+    }
+
+    private void OnDtmfDigit(SipClient _, char digit)
+    {
+        if (_grokEndPoint != null)
+            _grokEndPoint.OnDtmfDigit(digit);
+        else
+            _homeLineTools?.AppendDtmfDigit(digit);
     }
 
     /// <summary>
@@ -127,9 +170,9 @@ public class StreamingVoiceSipBotClient
     /// </summary>
     public async Task PlayWelcomeMessage()
     {
-        if (_audioEndPoint == null)
+        if (_audioEndPoint is not StreamingVoiceAudioEndPoint streaming)
         {
-            Log.Warning("Cannot play welcome: Audio endpoint not initialized.");
+            // Grok path speaks welcome via Realtime API
             return;
         }
 
@@ -141,11 +184,8 @@ public class StreamingVoiceSipBotClient
 
         try
         {
-            // Brief delay for session readiness
             await Task.Delay(200);
-
-            // Queue audio (PCMU; interruptible by VAD)
-            _audioEndPoint.SendAudio(_welcomeMessagePcmu);
+            streaming.SendAudio(_welcomeMessagePcmu);
             Log.Information("Welcome message queued for playback ({Bytes} bytes).", _welcomeMessagePcmu.Length);
         }
         catch (Exception ex)
@@ -156,15 +196,14 @@ public class StreamingVoiceSipBotClient
 
     private async Task InitializeWelcomeMessageAsync()
     {
+        if (_streamingSttClient is null || _llmClient is null)
+            return;
         try
         {
             var (pcmuMessageBytes, msgTxt) = await GetWelcomeMessageAsync(_streamingSttClient);
             _welcomeMessageText = msgTxt;
             _welcomeMessagePcmu = AudioAlgos.AppendBuffer(AudioAlgos.GeneratePcmuSilence(2, 8000), pcmuMessageBytes);
-
-            // Clear history for fresh session (immutable state reset)
             _llmClient.ClearHistory();
-
             Log.Information("Welcome message initialized successfully");
         }
         catch (Exception ex)
@@ -247,7 +286,8 @@ public class StreamingVoiceSipBotClient
     {
         ArgumentNullException.ThrowIfNull(sipSettings);
 
-        var transport = Algos.CreateSipTransport(sipSettings.Port);
+        // Local bind: ephemeral (0). sipSettings.Port is the *server* port for REGISTER, not local bind.
+        var transport = Algos.CreateSipTransport(0);
         var sipClient = new SipClient(transport, sipSettings);
 
         // Event handlers (answer/end/incoming are wired on Sip above)
@@ -284,50 +324,60 @@ public class StreamingVoiceSipBotClient
             Log.Information($"Incoming call from {sipRequest.Header.From.FriendlyDescription()}");
             sipClient.Accept(sipRequest);
 
-            // Reset LLM state for new call
-            _llmClient.ClearHistory();
-            if (!string.IsNullOrWhiteSpace(_welcomeMessageText))
+            _homeLineTools?.ResetSession();
+            _homeLineTools?.SetCallerAni(ExtractAni(sipRequest));
+            _llmClient?.ClearHistory();
+            if (_llmClient != null && !string.IsNullOrWhiteSpace(_welcomeMessageText))
                 _llmClient.AddAssistantMessage(_welcomeMessageText);
 
             // Tear down previous call endpoint if still around (back-to-back calls)
-            if (_audioEndPoint != null)
+            await DisposeAudioEndpointAsync().ConfigureAwait(false);
+
+            BaseAudioEndPoint eps;
+            if (_useGrokVoice)
             {
-                try
-                {
-                    await _audioEndPoint.ShutdownAsync().ConfigureAwait(false);
-                    _audioEndPoint.Dispose();
-                }
-                catch (Exception ex)
-                {
-                    Log.Warning(ex, "Error disposing previous audio endpoint before new call");
-                }
-                _audioEndPoint = null;
+                if (_homeLineTools is null)
+                    throw new InvalidOperationException("Grok Voice path requires HomeLine tools (HomelineBaseUrl).");
+
+                var apiKey = BotSettings.Settings.LanguageModel.ApiKey;
+                if (string.IsNullOrWhiteSpace(apiKey) || apiKey == "YOUR_API_KEY_HERE")
+                    throw new InvalidOperationException("Set XAI_API_KEY / LanguageModel.ApiKey for Grok Voice.");
+
+                var grok = new GrokVoiceAudioEndPoint(_homeLineTools, apiKey);
+                // Connect Grok WS before answer so welcome can start as soon as media is up
+                await grok.InitializeAsync().ConfigureAwait(false);
+                _grokEndPoint = grok;
+                eps = grok;
+            }
+            else
+            {
+                var local = new StreamingVoiceAudioEndPoint(
+                    _streamingSttClient!,
+                    _llmClient!,
+                    _ttsProvider!,
+                    onUserEngaged: _toolFunctions.CancelPendingHangup);
+                await local.InitializeAsync().ConfigureAwait(false);
+                eps = local;
             }
 
-            var eps = new StreamingVoiceAudioEndPoint(
-                _streamingSttClient,
-                _llmClient,
-                _ttsProvider,
-                onUserEngaged: _toolFunctions.CancelPendingHangup);
-            await eps.InitializeAsync().ConfigureAwait(false);
             _audioEndPoint = eps;
 
-            // Wait for welcome, bounded retry
-            if (_welcomeMessagePcmu == null)
+            // Local path: wait for pre-rendered welcome WAV
+            if (!_useGrokVoice && _welcomeMessagePcmu == null)
             {
                 Log.Information("Waiting for welcome message...");
                 const int maxWait = 50;  // 5s
                 for (int waitCount = 0; waitCount < maxWait && _welcomeMessagePcmu == null; waitCount++)
-                {
                     await Task.Delay(100).ConfigureAwait(false);
-                }
                 Log.Information(_welcomeMessagePcmu != null ? "Welcome ready" : "Welcome not ready; proceeding without");
             }
 
             var answered = await sipClient.Answer(eps, eps).ConfigureAwait(false);
             Log.Information(answered ? "Call answered successfully." : "Failed to answer call.");
 
-            _ = PlayWelcomeMessage();
+            if (!_useGrokVoice)
+                _ = PlayWelcomeMessage();
+            // Grok path: SpeakWelcomeAsync already fired inside GrokVoiceAudioEndPoint.InitializeAsync
         }
         catch (Exception ex)
         {
@@ -335,25 +385,50 @@ public class StreamingVoiceSipBotClient
         }
     }
 
-    private void OnCallEnded(SipClient _)
+    private async Task DisposeAudioEndpointAsync()
     {
-        Log.Information("Call ended.");
-        _homeLineTools?.ResetSession();
+        var ep = _audioEndPoint;
+        _audioEndPoint = null;
+        _grokEndPoint = null;
+        if (ep == null) return;
         try
         {
-            _audioEndPoint?.Dispose();
+            await ep.ShutdownAsync().ConfigureAwait(false);
+            if (ep is IDisposable d)
+                d.Dispose();
         }
         catch (Exception ex)
         {
-            Log.Warning(ex, "Error disposing audio endpoint on call end");
-        }
-        finally
-        {
-            _audioEndPoint = null;
+            Log.Warning(ex, "Error disposing previous audio endpoint");
         }
     }
 
-    private void OnCallAnswered(SipClient _) => Log.Information("Call answered!");
+    private void OnCallEnded(SipClient client)
+    {
+        Log.Information("Call ended.");
+        _homeLineTools?.ResetSession();
+        _ = DisposeAudioEndpointAsync();
+    }
+
+    private void OnCallAnswered(SipClient client) => Log.Information("Call answered!");
+
+    /// <summary>Best-effort caller ID from SIP From user part.</summary>
+    private static string? ExtractAni(SIPRequest req)
+    {
+        try
+        {
+            var user = req.Header.From?.FromURI?.User;
+            if (string.IsNullOrWhiteSpace(user))
+                return null;
+            // Prefer E.164-ish digit strings
+            var digits = new string(user.Where(c => char.IsDigit(c) || c == '+').ToArray());
+            return digits.Length >= 3 ? digits : user.Trim();
+        }
+        catch
+        {
+            return null;
+        }
+    }
 
     /// <summary>
     /// Stops client
@@ -361,13 +436,8 @@ public class StreamingVoiceSipBotClient
     public async Task StopAsync()
     {
         Log.Information("Stopping streaming voice SIP bot client...");
-        if (_audioEndPoint != null)
-        {
-            await _audioEndPoint.ShutdownAsync();
-            _audioEndPoint.Dispose();
-            _audioEndPoint = null;
-        }
-        _ttsProvider.Dispose();
+        await DisposeAudioEndpointAsync().ConfigureAwait(false);
+        _ttsProvider?.Dispose();
         _streamingSttClient?.Dispose();
         Log.Information("Streaming voice SIP bot client stopped successfully.");
     }

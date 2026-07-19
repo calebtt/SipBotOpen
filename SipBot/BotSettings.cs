@@ -66,10 +66,41 @@ public static class BotSettings
             ProfileExtension = profileTemp.ProfileExtension
         };
 
+        // Env overrides (production secrets — never commit real keys into profile JSON)
+        ApplyEnvironmentOverrides();
+
         // Post-load validation
         ValidateSettings();
 
         Log.Information("Settings loaded successfully for profile: {ProfileName} from {ProfileFile}", cleanProfileName, fullProfilePath);
+    }
+
+    private static void ApplyEnvironmentOverrides()
+    {
+        var apiKey = Environment.GetEnvironmentVariable("XAI_API_KEY")
+            ?? Environment.GetEnvironmentVariable("GROK_API_KEY")
+            ?? Environment.GetEnvironmentVariable("LANGUAGE_MODEL_API_KEY");
+        if (!string.IsNullOrWhiteSpace(apiKey)
+            && (string.IsNullOrWhiteSpace(Settings.LanguageModel.ApiKey)
+                || Settings.LanguageModel.ApiKey is "YOUR_API_KEY_HERE" or "changeme"))
+        {
+            Settings.LanguageModel.ApiKey = apiKey.Trim();
+            Log.Information("LanguageModel.ApiKey set from environment");
+        }
+
+        var baseUrl = Environment.GetEnvironmentVariable("HOMELINE_BASE_URL");
+        if (!string.IsNullOrWhiteSpace(baseUrl))
+        {
+            Settings.ProfileExtension.HomelineBaseUrl = baseUrl.Trim().TrimEnd('/');
+            Log.Information("HomelineBaseUrl overridden from env → {Url}", Settings.ProfileExtension.HomelineBaseUrl);
+        }
+
+        var token = Environment.GetEnvironmentVariable("HOMELINE_SERVICE_TOKEN");
+        if (!string.IsNullOrWhiteSpace(token))
+        {
+            Settings.ProfileExtension.HomelineServiceToken = token.Trim();
+            Log.Information("HomelineServiceToken set from environment");
+        }
     }
 
     public static void LoadSettingsFromJson(string? profileName = null, string? profilesDirectory = null) =>
@@ -89,14 +120,17 @@ public static class BotSettings
 
     private static void ValidateSettings()
     {
-        if (string.IsNullOrEmpty(Settings.SpeechToText.SttModelUrl))
-            throw new InvalidOperationException("SpeechToText.SttModelUrl is required.");
+        // Whisper model only required for local speech path
+        bool useGrok = StreamingVoiceSipBotClient.UseGrokVoice;
+        if (!useGrok && string.IsNullOrEmpty(Settings.SpeechToText.SttModelUrl))
+            throw new InvalidOperationException("SpeechToText.SttModelUrl is required for local STT.");
 
         if (!Settings.SipSettings.Configs.Any())
             throw new InvalidOperationException("At least one SIP config is required.");
 
-        if (string.IsNullOrEmpty(Settings.LanguageModel.ApiKey))
-            throw new InvalidOperationException("LanguageModel.ApiKey is required.");
+        if (string.IsNullOrEmpty(Settings.LanguageModel.ApiKey)
+            || Settings.LanguageModel.ApiKey is "YOUR_API_KEY_HERE")
+            throw new InvalidOperationException("LanguageModel.ApiKey is required (set XAI_API_KEY).");
 
         // Program selects the listen account via LanguageModel.ListenSipAccountIndex
         // (ProfileExtension.SipAccountIndex is legacy and not used at runtime).

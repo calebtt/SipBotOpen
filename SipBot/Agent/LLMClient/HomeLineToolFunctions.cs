@@ -13,8 +13,11 @@ public class HomeLineToolFunctions : SimpleSemanticToolFunctions
 {
     private readonly HomeLineRelayClient _relay;
     private readonly JsonSerializerOptions _json = new() { WriteIndented = false };
+    private readonly object _dtmfLock = new();
+    private readonly System.Text.StringBuilder _dtmfBuffer = new();
     private string? _sessionToken;
     private string? _agentHints;
+    private string? _callerAni;
 
     public HomeLineToolFunctions(
         HomeLineRelayClient relay,
@@ -25,20 +28,65 @@ public class HomeLineToolFunctions : SimpleSemanticToolFunctions
         _relay = relay ?? throw new ArgumentNullException(nameof(relay));
     }
 
+    /// <summary>Set calling number from SIP From / P-Asserted-Identity for this call.</summary>
+    public void SetCallerAni(string? ani) => _callerAni = string.IsNullOrWhiteSpace(ani) ? null : ani.Trim();
+
+    /// <summary>Append a RFC2833 DTMF digit (keypad PIN).</summary>
+    public void AppendDtmfDigit(char digit)
+    {
+        lock (_dtmfLock)
+        {
+            if (_dtmfBuffer.Length >= 16)
+                _dtmfBuffer.Clear();
+            _dtmfBuffer.Append(digit);
+            Log.Information("HomeLine DTMF buffer now: {Buf}", MaskPin(_dtmfBuffer.ToString()));
+        }
+    }
+
+    private static string MaskPin(string s) =>
+        s.Length <= 1 ? s : new string('*', s.Length - 1) + s[^1];
+
     /// <summary>Clear per-call session when the SIP call ends.</summary>
     public void ResetSession()
     {
         _sessionToken = null;
         _agentHints = null;
+        _callerAni = null;
+        lock (_dtmfLock) { _dtmfBuffer.Clear(); }
+    }
+
+    [KernelFunction("get_dtmf_digits")]
+    [Description(
+        "Return keypad digits collected so far this call (for the 4-digit PIN). " +
+        "Call after the user has finished entering PIN on the keypad.")]
+    public Task<string> GetDtmfDigitsAsync()
+    {
+        string digits;
+        lock (_dtmfLock) { digits = _dtmfBuffer.ToString(); }
+        return Task.FromResult(JsonSerializer.Serialize(new
+        {
+            digits,
+            length = digits.Length,
+            ready_for_pin = digits.Length >= 4,
+            pin_candidate = digits.Length >= 4 ? digits[^4..] : "",
+        }, _json));
+    }
+
+    [KernelFunction("clear_dtmf_digits")]
+    [Description("Clear keypad digit buffer (e.g. before re-prompting for PIN).")]
+    public Task<string> ClearDtmfDigitsAsync()
+    {
+        lock (_dtmfLock) { _dtmfBuffer.Clear(); }
+        return Task.FromResult(JsonSerializer.Serialize(new { status = "cleared" }, _json));
     }
 
     [KernelFunction("authenticate_pin")]
     [Description(
         "Authenticate after the caller enters their 4-digit DTMF PIN and says their name. " +
-        "Call this first before other HomeLine tools. Pass pin from keypad and spoken_name from speech. " +
+        "Call this first before other HomeLine tools. Pass pin from keypad (or leave empty to use last 4 DTMF digits) and spoken_name from speech. " +
         "Never ask them to speak the PIN aloud. Returns session context: contacts, credits, invite code, unread.")]
     public async Task<string> AuthenticatePinAsync(
-        [Description("Exactly 4-digit PIN from the keypad (DTMF)")] string pin,
+        [Description("Exactly 4-digit PIN from the keypad (DTMF). Empty = use last 4 collected DTMF digits.")] string pin,
         [Description("Name they spoke after the PIN (first or full name on file)")] string spoken_name,
         [Description("Caller ANI if known, else empty")] string? ani = "")
     {
@@ -51,9 +99,31 @@ public class HomeLineToolFunctions : SimpleSemanticToolFunctions
                     detail = "Ask them to say their name after the PIN, then call again with spoken_name.",
                 }, _json);
 
+            string pinUse = (pin ?? "").Trim();
+            if (string.IsNullOrEmpty(pinUse) || pinUse.Length < 4)
+            {
+                lock (_dtmfLock)
+                {
+                    var buf = _dtmfBuffer.ToString();
+                    if (buf.Length >= 4)
+                        pinUse = buf[^4..];
+                }
+            }
+            // Digits only
+            pinUse = new string(pinUse.Where(char.IsDigit).ToArray());
+            if (pinUse.Length != 4)
+                return JsonSerializer.Serialize(new
+                {
+                    error = "pin_required",
+                    detail = "Need exactly 4 keypad digits. Ask them to enter the PIN on the keypad, then call again.",
+                    dtmf_length = _dtmfBuffer.Length,
+                }, _json);
+
+            var aniUse = !string.IsNullOrWhiteSpace(ani) ? ani.Trim() : _callerAni;
+
             var result = await _relay.AuthAsync(
-                pin.Trim(),
-                string.IsNullOrWhiteSpace(ani) ? null : ani,
+                pinUse,
+                aniUse,
                 spoken_name.Trim()).ConfigureAwait(false);
             if (result is null)
                 return JsonSerializer.Serialize(new { error = "Authentication failed", detail = "Relay unreachable or invalid response" }, _json);

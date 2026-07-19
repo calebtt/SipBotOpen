@@ -8,23 +8,30 @@ public class Program
     private static async Task RunStreamingVoiceTest()
     {
         List<SipConfig> sipConfigs = BotSettings.Settings.SipSettings.Configs;
-        string grokApiKey = BotSettings.Settings.LanguageModel.ApiKey;
+        bool useGrok = StreamingVoiceSipBotClient.UseGrokVoice;
 
         // Configure audio processing for excellent echo cancellation and noise suppression
         var audioConfig = AudioProcessingConfig.CreateDefault();
         audioConfig.LogConfiguration();
 
-        // Initialize TTS service for streaming client
-        await TtsProviderStreaming.InitializeAsync();
-        var voices = TtsProviderStreaming.ListVoices();
-        Log.Information("Available TTS voices:");
-        voices.ToList().ForEach(voice => Log.Information($" - {voice}"));
-
-        // generate welcome message
-        await EnsureWelcomeMessageExistsAsync();
+        if (useGrok)
+        {
+            Log.Information("HomeLine speech: Grok Voice Realtime (cloud). Skipping local Kokoro TTS / Whisper STT init.");
+            var key = BotSettings.Settings.LanguageModel.ApiKey;
+            if (string.IsNullOrWhiteSpace(key) || key == "YOUR_API_KEY_HERE")
+                throw new InvalidOperationException("Grok Voice requires XAI_API_KEY (or LanguageModel.ApiKey).");
+        }
+        else
+        {
+            // Local speech path (personal profile / HOMELINE_SPEECH=local)
+            await TtsProviderStreaming.InitializeAsync();
+            var voices = TtsProviderStreaming.ListVoices();
+            Log.Information("Available TTS voices:");
+            voices.ToList().ForEach(voice => Log.Information($" - {voice}"));
+            await EnsureWelcomeMessageExistsAsync();
+        }
 
         Log.Information($" -> (Currently running only 1) -> Constructing {sipConfigs.Count} streaming SIP clients to listen for calls.");
-        List<StreamingVoiceSipBotClient> clients = new();
 
         // Load sip account index
         int sipIndex = BotSettings.Settings.LanguageModel.ListenSipAccountIndex;
@@ -37,8 +44,10 @@ public class Program
         // Construct with selected SIP config.
         var sipBotClient = new StreamingVoiceSipBotClient(selectedConfig);
 
-        Log.Information("Listening for incoming calls with streaming STT, streaming TTS, and real-time interruption detection...");
-
+        Log.Information(
+            useGrok
+                ? "Listening for calls — SIP/RTP local, speech via Grok Voice API..."
+                : "Listening for incoming calls with streaming STT, streaming TTS, and real-time interruption detection...");
         // Headless-friendly wait: Ctrl+C / SIGTERM, or a keypress when a real console is attached.
         using var exitCts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>

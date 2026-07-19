@@ -1,0 +1,13 @@
+{
+  "SipSettings": {
+    "configs": [
+      {
+        "server": "127.0.0.1",
+        "port": 5060,
+        "username": "103",
+        "password": "CHANGE_ME",
+        "fromname": "HomeLine"
+      }
+    ]
+  }
+}
